@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  admin
+  agent
+}
+
+enum WabaSource {
+  embedded_signup
+  manual_token
+}
+
+enum ConversationStatus {
+  open
+  pending
+  closed
+}
+
+enum MessageDirection {
+  in
+  out
+}
+
+enum MessageStatus {
+  sent
+  delivered
+  read
+  failed
+}
+
+enum WebhookProcessStatus {
+  pending
+  ok
+  failed
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  plan      String   @default("free")
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users           User[]
+  wabaConnections WabaConnection[]
+  contacts        Contact[]
+  conversations   Conversation[]
+  messages        Message[]
+  webhookEvents   WebhookEvent[]
+  templates       Template[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  email        String
+  passwordHash String
+  role         UserRole @default(agent)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant              Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedConversations Conversation[] @relation("AssignedAgent")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model WabaConnection {
+  id              String     @id @default(cuid())
+  tenantId        String
+  wabaId          String?
+  phoneNumberId   String
+  accessTokenEnc  String
+  businessId      String?
+  source          WabaSource
+  status          String     @default("active")
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@index([tenantId])
+  @@index([phoneNumberId])
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  tenantId  String
+  waId      String
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([tenantId, waId])
+  @@index([tenantId])
+}
+
+model Conversation {
+  id               String             @id @default(cuid())
+  tenantId         String
+  contactId        String
+  wabaConnectionId String
+  status           ConversationStatus @default(open)
+  assignedUserId   String?
+  lastInboundAt    DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact        Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  wabaConnection WabaConnection @relation(fields: [wabaConnectionId], references: [id], onDelete: Cascade)
+  assignedUser   User?          @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  messages       Message[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Message {
+  id             String           @id @default(cuid())
+  tenantId       String
+  conversationId String
+  direction      MessageDirection
+  type           String
+  payload        Json
+  wamid          String?          @unique
+  status         MessageStatus    @default(sent)
+  createdAt      DateTime         @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([conversationId])
+}
+
+model WebhookEvent {
+  id             String               @id @default(cuid())
+  tenantId       String?
+  type           String
+  rawPayload     Json
+  signatureValid Boolean
+  processStatus  WebhookProcessStatus @default(pending)
+  error          String?
+  processedAt    DateTime?
+  createdAt      DateTime             @default(now())
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([processStatus])
+}
+
+model Template {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  language  String
+  category  String?
+  status    String?
+  body      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name, language])
+  @@index([tenantId])
+}
