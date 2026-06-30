@@ -21,8 +21,10 @@ export class WebhookProcessor extends WorkerHost {
     });
     if (!event) return; // evento borrado; nada que hacer
 
+    // Fuera del try: si falla a mitad, conservamos el tenant ya resuelto para
+    // que la auditoría (feature 06) pueda atribuir el evento fallido a su tenant.
+    let tenantId: string | null = null;
     try {
-      let tenantId: string | null = null;
       for (const change of decodeWebhook(event.rawPayload)) {
         if (!change.phoneNumberId) continue;
         const conn = await this.prisma.wabaConnection.findFirst({
@@ -47,7 +49,7 @@ export class WebhookProcessor extends WorkerHost {
       const message = err instanceof Error ? err.message : String(err);
       await this.prisma.webhookEvent.update({
         where: { id: event.id },
-        data: { processStatus: 'failed', processedAt: new Date(), error: message },
+        data: { tenantId, processStatus: 'failed', processedAt: new Date(), error: message },
       });
       throw err; // deja que BullMQ reintente con backoff
     }

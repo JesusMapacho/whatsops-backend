@@ -3,7 +3,9 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { EventsModule } from '../events/events.module';
 import { WebhookController } from './webhook.controller';
+import { WebhookEventsController } from './webhook-events.controller';
 import { WebhookService, WEBHOOK_QUEUE } from './webhook.service';
+import { WebhookEventsService } from './webhook-events.service';
 import { WebhookProcessor } from './webhook.processor';
 
 @Module({
@@ -19,7 +21,7 @@ import { WebhookProcessor } from './webhook.processor';
       },
     }),
   ],
-  controllers: [WebhookController],
-  providers: [WebhookService, WebhookProcessor],
+  controllers: [WebhookController, WebhookEventsController],
+  providers: [WebhookService, WebhookEventsService, WebhookProcessor],
 })
 export class WebhookModule {}

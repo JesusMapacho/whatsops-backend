@@ -56,6 +56,8 @@ model Tenant {
   messages        Message[]
   webhookEvents   WebhookEvent[]
   templates       Template[]
+  notes           Note[]
+  cannedResponses CannedResponse[]
 }
 
 model User {
@@ -69,6 +71,7 @@ model User {
 
   tenant              Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   assignedConversations Conversation[] @relation("AssignedAgent")
+  notes               Note[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -116,6 +119,7 @@ model Conversation {
   status           ConversationStatus @default(open)
   assignedUserId   String?
   lastInboundAt    DateTime?
+  lastReadAt       DateTime?
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -124,6 +128,7 @@ model Conversation {
   wabaConnection WabaConnection @relation(fields: [wabaConnectionId], references: [id], onDelete: Cascade)
   assignedUser   User?          @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
   messages       Message[]
+  notes          Note[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -178,5 +183,37 @@ model Template {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, name, language])
+  @@index([tenantId])
+}
+
+// Nota interna: visible para agentes, nunca se envía a WhatsApp.
+model Note {
+  id             String   @id @default(cuid())
+  tenantId       String
+  conversationId String
+  authorId       String
+  body           String
+  createdAt      DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([conversationId])
+}
+
+// Respuesta rápida: plantilla de texto interna del tenant para la caja de envío.
+model CannedResponse {
+  id        String   @id @default(cuid())
+  tenantId  String
+  title     String
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, title])
   @@index([tenantId])
 }

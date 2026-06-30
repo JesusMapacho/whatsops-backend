@@ -1,0 +1,32 @@
+import { Prisma, ConversationStatus } from '@prisma/client';
+
+export type ConversationFilter = 'open' | 'mine' | 'unassigned';
+
+// Construye el where de la lista de conversaciones según el filtro. Siempre
+// acotado por tenantId; nunca cruza tenants.
+export function buildConversationWhere(
+  tenantId: string,
+  filter: ConversationFilter | string | undefined,
+  userId: string,
+): Prisma.ConversationWhereInput {
+  switch (filter) {
+    case 'mine':
+      return { tenantId, assignedUserId: userId };
+    case 'unassigned':
+      return { tenantId, assignedUserId: null };
+    case 'open':
+      return { tenantId, status: 'open' };
+    default:
+      return { tenantId };
+  }
+}
+
+const STATUSES: ConversationStatus[] = ['open', 'pending', 'closed'];
+
+// Valida el status entrante del cliente; lanza si no es del enum.
+export function parseStatus(v: unknown): ConversationStatus {
+  if (typeof v === 'string' && (STATUSES as string[]).includes(v)) {
+    return v as ConversationStatus;
+  }
+  throw new Error('status debe ser open, pending o closed');
+}
