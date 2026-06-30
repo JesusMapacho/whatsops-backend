@@ -1,5 +1,5 @@
 // ponytail: validación de env a mano, sin Joi/class-validator. Falla rápido si falta algo.
-const REQUIRED = ['DATABASE_URL', 'REDIS_URL', 'PORT', 'JWT_SECRET', 'ENCRYPTION_KEY'] as const;
+const REQUIRED = ['DATABASE_URL', 'REDIS_URL', 'PORT', 'JWT_SECRET', 'ENCRYPTION_KEY', 'WEBHOOK_VERIFY_TOKEN', 'META_APP_SECRET'] as const;
 
 export function validateEnv(config: Record<string, unknown>): Record<string, unknown> {
   const missing = REQUIRED.filter((k) => !config[k]);
