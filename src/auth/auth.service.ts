@@ -6,6 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
+import { RolesService } from '../roles/roles.service';
 import { validateCredentials } from './validate';
 
 @Injectable()
@@ -13,6 +14,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly roles: RolesService,
   ) {}
 
   // Registro: crea Tenant + primer User admin en una transacción.
@@ -27,11 +29,19 @@ export class AuthService {
     try {
       const user = await this.prisma.$transaction(async (tx) => {
         const tenant = await tx.tenant.create({ data: { name: tenantName } });
+        // Siembra roles de sistema del nuevo tenant y asigna admin al primer user.
+        const { adminRoleId } = await this.roles.ensureSystemRoles(tenant.id, tx);
         return tx.user.create({
-          data: { tenantId: tenant.id, email, passwordHash, role: 'admin' },
+          data: {
+            tenantId: tenant.id,
+            email,
+            passwordHash,
+            role: 'admin',
+            roleId: adminRoleId,
+          },
         });
       });
-      return this.sign(user.id, user.tenantId, user.role);
+      return this.sign(user.id, user.tenantId, user.role, user.roleId);
     } catch (e: any) {
       if (e?.code === 'P2002') {
         throw new ConflictException('El email ya está registrado');
@@ -49,11 +59,16 @@ export class AuthService {
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       throw new UnauthorizedException('Credenciales inválidas');
     }
-    return this.sign(user.id, user.tenantId, user.role);
+    return this.sign(user.id, user.tenantId, user.role, user.roleId);
   }
 
-  private async sign(userId: string, tenantId: string, role: string) {
-    const accessToken = await this.jwt.signAsync({ sub: userId, tenantId, role });
-    return { accessToken, user: { id: userId, tenantId, role } };
+  private async sign(
+    userId: string,
+    tenantId: string,
+    role: string,
+    roleId: string | null,
+  ) {
+    const accessToken = await this.jwt.signAsync({ sub: userId, tenantId, role, roleId });
+    return { accessToken, user: { id: userId, tenantId, role, roleId } };
   }
 }

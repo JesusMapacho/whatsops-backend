@@ -50,6 +50,7 @@ model Tenant {
   updatedAt DateTime @updatedAt
 
   users           User[]
+  roles           Role[]
   wabaConnections WabaConnection[]
   contacts        Contact[]
   conversations   Conversation[]
@@ -60,16 +61,57 @@ model Tenant {
   cannedResponses CannedResponse[]
 }
 
+// RBAC: roles configurables por tenant. admin/agent se siembran como isSystem
+// para compatibilidad con el enum UserRole.
+model Role {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users       User[]
+  permissions RolePermission[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Catálogo de permisos: la clave (recurso:accion) se siembra desde código
+// (permissions.catalog.ts). No lleva tenantId: el catálogo es global; las
+// asignaciones por tenant viven en RolePermission.
+model Permission {
+  id    String @id @default(cuid())
+  key   String @unique
+
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([roleId])
+}
+
 model User {
   id           String   @id @default(cuid())
   tenantId     String
   email        String
   passwordHash String
   role         UserRole @default(agent)
+  roleId       String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   tenant              Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roleRef             Role?          @relation(fields: [roleId], references: [id], onDelete: SetNull)
   assignedConversations Conversation[] @relation("AssignedAgent")
   notes               Note[]
 

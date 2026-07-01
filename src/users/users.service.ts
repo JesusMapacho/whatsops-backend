@@ -13,9 +13,11 @@ export class UsersService {
     const { email, password } = validateCredentials(body?.email, body?.password);
     const role: UserRole = body?.role === 'admin' ? 'admin' : 'agent';
     const passwordHash = await bcrypt.hash(password, 10);
+    // Mapea el enum al rol de sistema del tenant para poblar roleId (RBAC).
+    const roleId = await this.systemRoleId(tenantId, role);
     try {
       const user = await this.prisma.user.create({
-        data: { tenantId, email, passwordHash, role },
+        data: { tenantId, email, passwordHash, role, roleId },
       });
       return this.toPublic(user);
     } catch (e: any) {
@@ -29,6 +31,16 @@ export class UsersService {
   async list(tenantId: string) {
     const users = await this.prisma.user.findMany({ where: { tenantId } });
     return users.map((u) => this.toPublic(u));
+  }
+
+  // roleId del rol de sistema (admin|agent) del tenant. Los roles se aseguran al
+  // arrancar y al registrar el tenant, así que normalmente existen.
+  private async systemRoleId(tenantId: string, name: UserRole): Promise<string | null> {
+    const role = await this.prisma.role.findUnique({
+      where: { tenantId_name: { tenantId, name } },
+      select: { id: true },
+    });
+    return role?.id ?? null;
   }
 
   private toPublic(u: { id: string; email: string; role: UserRole; tenantId: string }) {

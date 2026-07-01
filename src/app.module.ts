@@ -11,8 +11,10 @@ import { WabaModule } from './waba/waba.module';
 import { EventsModule } from './events/events.module';
 import { WebhookModule } from './webhook/webhook.module';
 import { MessagingModule } from './messaging/messaging.module';
+import { RolesModule } from './roles/roles.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
+import { PermissionsGuard } from './auth/permissions.guard';
 
 @Module({
   imports: [
@@ -40,12 +42,14 @@ import { RolesGuard } from './auth/roles.guard';
     EventsModule,
     WebhookModule,
     MessagingModule,
+    RolesModule,
   ],
   controllers: [HealthController],
   providers: [
-    // Orden importa: primero autentica (pone req.user), luego revisa rol.
+    // Orden importa: primero autentica (pone req.user), luego rol, luego permiso.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: PermissionsGuard },
   ],
 })
 export class AppModule {}
