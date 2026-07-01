@@ -7,6 +7,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { RolesService } from '../roles/roles.service';
+import { AuthUser } from './current-user.decorator';
 import { validateCredentials } from './validate';
 
 @Injectable()
@@ -59,7 +60,21 @@ export class AuthService {
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       throw new UnauthorizedException('Credenciales inválidas');
     }
+    // Un usuario desactivado no puede loguear (conserva su atribución).
+    if (user.status === 'disabled') {
+      throw new UnauthorizedException('Usuario desactivado');
+    }
     return this.sign(user.id, user.tenantId, user.role, user.roleId);
+  }
+
+  async me(auth: AuthUser) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: auth.userId },
+      select: { id: true, email: true, role: true, roleId: true, status: true, tenantId: true },
+    });
+    if (!user) throw new UnauthorizedException('Usuario no encontrado');
+    const permissions = await this.roles.permissionKeysFor(user.role, user.roleId);
+    return { ...user, permissions };
   }
 
   private async sign(

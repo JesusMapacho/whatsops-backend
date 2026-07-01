@@ -80,6 +80,17 @@ export class RolesService implements OnModuleInit {
     return role.id;
   }
 
+  // Permisos efectivos de un usuario (admin de sistema = todos).
+  async permissionKeysFor(role: string, roleId: string | null): Promise<string[]> {
+    if (role === 'admin') return [...PERMISSIONS];
+    if (!roleId) return [];
+    const rows = await this.prisma.rolePermission.findMany({
+      where: { roleId },
+      select: { permission: { select: { key: true } } },
+    });
+    return rows.map((r) => r.permission.key);
+  }
+
   // --- API de administración (scoped por tenant) ---
 
   listCatalog() {
