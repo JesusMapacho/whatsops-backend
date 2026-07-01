@@ -46,6 +46,33 @@ export class ErrorLogsService implements OnModuleInit {
     }
   }
 
+  // Auditoría de acceso (no error): registra una acción del super-admin en la
+  // misma tabla, marcada con errorCode PLATFORM_AUDIT y statusCode 200. Mejor
+  // esfuerzo, no bloquea.
+  audit(entry: {
+    actorUserId: string;
+    tenantId: string | null;
+    method: string;
+    path: string;
+    action: string;
+    requestId?: string;
+  }) {
+    return this.prisma.errorLog
+      .create({
+        data: {
+          tenantId: entry.tenantId,
+          userId: entry.actorUserId,
+          method: entry.method,
+          path: entry.path,
+          statusCode: 200,
+          errorMessage: entry.action.slice(0, 2000),
+          errorCode: 'PLATFORM_AUDIT',
+          requestId: entry.requestId ?? 'platform-audit',
+        },
+      })
+      .catch((e) => this.logger.error(`Auditoría falló: ${e?.message ?? e}`));
+  }
+
   // tenantId null = todos los tenants (solo alcanzable por el guard de plataforma, feature 03).
   async list(tenantId: string | null, filters: ErrorLogFilters, limit = 50, before?: string) {
     const where: Prisma.ErrorLogWhereInput = {};

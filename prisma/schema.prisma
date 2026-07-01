@@ -108,6 +108,7 @@ model User {
   role         UserRole @default(agent)
   roleId       String?
   status       String   @default("active") // active | disabled
+  isPlatform   Boolean  @default(false)    // super-admin operador (cross-tenant)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

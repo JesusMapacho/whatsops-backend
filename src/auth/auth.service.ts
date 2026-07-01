@@ -56,7 +56,10 @@ export class AuthService {
     // Sin tenant en login: el email es único globalmente en la práctica del MVP.
     // ponytail: findFirst por email; si dos tenants comparten email, añadir
     // selector de tenant en login.
-    const user = await this.prisma.user.findFirst({ where: { email } });
+    const user = await this.prisma.user.findFirst({
+      where: { email },
+      include: { tenant: { select: { status: true } } },
+    });
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       throw new UnauthorizedException('Credenciales inválidas');
     }
@@ -64,13 +67,25 @@ export class AuthService {
     if (user.status === 'disabled') {
       throw new UnauthorizedException('Usuario desactivado');
     }
+    // Tenant suspendido: sus usuarios no operan (el super-admin no lo está).
+    if (user.tenant?.status === 'suspended') {
+      throw new UnauthorizedException('Tenant suspendido');
+    }
     return this.sign(user.id, user.tenantId, user.role, user.roleId);
   }
 
   async me(auth: AuthUser) {
     const user = await this.prisma.user.findUnique({
       where: { id: auth.userId },
-      select: { id: true, email: true, role: true, roleId: true, status: true, tenantId: true },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        roleId: true,
+        status: true,
+        isPlatform: true,
+        tenantId: true,
+      },
     });
     if (!user) throw new UnauthorizedException('Usuario no encontrado');
     const permissions = await this.roles.permissionKeysFor(user.role, user.roleId);

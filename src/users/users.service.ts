@@ -107,7 +107,8 @@ export class UsersService {
   private async mustFind(tenantId: string, id: string) {
     const user = await this.prisma.user.findFirst({ where: { id, tenantId } });
     if (!user) throw new NotFoundException('Usuario no encontrado');
-    // El guard de super-admin (isPlatform) se añade en feature 03.
+    // El super-admin (isPlatform) nunca se gestiona desde la UI de un tenant.
+    if (user.isPlatform) throw new NotFoundException('Usuario no encontrado');
     return user;
   }
 
