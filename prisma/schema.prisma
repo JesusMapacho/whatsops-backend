@@ -228,6 +228,30 @@ model Template {
   @@index([tenantId])
 }
 
+// Log core de errores de la API. tenantId/userId nullable (errores pre-auth o
+// de plataforma). requestBody/query se guardan REDACTADOS (redact.ts): jamás
+// tokens, passwords ni PAN. Sin FK: un usuario borrado no debe romper el log.
+model ErrorLog {
+  id           String   @id @default(cuid())
+  tenantId     String?
+  userId       String?
+  method       String
+  path         String
+  statusCode   Int
+  requestBody  Json?
+  query        Json?
+  errorMessage String
+  errorCode    String?
+  stack        String?
+  requestId    String
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([statusCode])
+  @@index([path])
+  @@index([createdAt])
+}
+
 // Nota interna: visible para agentes, nunca se envía a WhatsApp.
 model Note {
   id             String   @id @default(cuid())

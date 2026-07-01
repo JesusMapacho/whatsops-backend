@@ -12,6 +12,7 @@ import { EventsModule } from './events/events.module';
 import { WebhookModule } from './webhook/webhook.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { RolesModule } from './roles/roles.module';
+import { ObservabilityModule } from './observability/observability.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -43,6 +44,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     WebhookModule,
     MessagingModule,
     RolesModule,
+    ObservabilityModule,
   ],
   controllers: [HealthController],
   providers: [
