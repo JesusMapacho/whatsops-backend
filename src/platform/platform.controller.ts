@@ -10,6 +10,7 @@ import {
 import { PlatformService } from './platform.service';
 import { PlatformGuard } from './platform.guard';
 import { ErrorLogsService } from '../observability/error-logs.service';
+import { MetricsNegocioService } from '../analytics/metrics-negocio.service';
 
 // Consola de plataforma (super-admin). Todo cross-tenant y auditado por el guard.
 @UseGuards(PlatformGuard)
@@ -18,6 +19,7 @@ export class PlatformController {
   constructor(
     private readonly platform: PlatformService,
     private readonly logs: ErrorLogsService,
+    private readonly metrics: MetricsNegocioService,
   ) {}
 
   @Get('tenants')
@@ -33,6 +35,12 @@ export class PlatformController {
   @Patch('tenants/:id')
   updateTenant(@Param('id') id: string, @Body() body: any) {
     return this.platform.updateTenant(id, body);
+  }
+
+  // Agregados de negocio de un tenant (cross-tenant, auditado por el guard).
+  @Get('tenants/:id/metrics-negocio')
+  tenantMetrics(@Param('id') id: string, @Query('from') from?: string, @Query('to') to?: string) {
+    return this.metrics.summary(id, { from, to });
   }
 
   // Auditoría cross-tenant: consume los logs de la feature 05 (errores + accesos

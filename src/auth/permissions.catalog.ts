@@ -12,6 +12,7 @@ export const PERMISSIONS = [
   'logs:read',
   'analytics:read',
 ] as const;
+// nota: 'analytics:read' ya está en el catálogo (feature 07 lo consume).
 
 export type PermissionKey = (typeof PERMISSIONS)[number];
 

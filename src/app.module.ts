@@ -15,6 +15,7 @@ import { RolesModule } from './roles/roles.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { PlatformModule } from './platform/platform.module';
 import { BillingModule } from './billing/billing.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -49,6 +50,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     ObservabilityModule,
     PlatformModule,
     BillingModule,
+    AnalyticsModule,
   ],
   controllers: [HealthController],
   providers: [
