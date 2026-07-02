@@ -2,13 +2,38 @@ import { Prisma, ConversationStatus } from '@prisma/client';
 
 export type ConversationFilter = 'open' | 'mine' | 'unassigned';
 
+// Un agente solo puede ver/actuar sobre conversaciones suyas o abiertas.
+// El admin no tiene esta restricción.
+export function agentScope(
+  role: string,
+  userId: string,
+): Prisma.ConversationWhereInput {
+  if (role === 'admin') return {};
+  return { OR: [{ assignedUserId: userId }, { status: 'open' }] };
+}
+
+// Where de una conversación concreta con el alcance del agente aplicado.
+export function conversationScopeWhere(
+  tenantId: string,
+  id: string,
+  userId: string,
+  role: string,
+): Prisma.ConversationWhereInput {
+  return { id, tenantId, ...agentScope(role, userId) };
+}
+
 // Construye el where de la lista de conversaciones según el filtro. Siempre
-// acotado por tenantId; nunca cruza tenants.
+// acotado por tenantId; nunca cruza tenants. El agente queda restringido a las
+// suyas + abiertas sin importar el filtro.
 export function buildConversationWhere(
   tenantId: string,
   filter: ConversationFilter | string | undefined,
   userId: string,
+  role: string,
 ): Prisma.ConversationWhereInput {
+  if (role !== 'admin') {
+    return { tenantId, ...agentScope(role, userId) };
+  }
   switch (filter) {
     case 'mine':
       return { tenantId, assignedUserId: userId };

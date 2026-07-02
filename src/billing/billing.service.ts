@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
@@ -46,6 +46,9 @@ export class BillingService {
   // devolvería su client_secret para que el navegador tokenice (PAN → Stripe).
   // En stub devuelve un client_secret simulado; el backend nunca ve el PAN.
   async createSetupIntent(tenantId: string) {
+    if (tenantId === 'platform') {
+      throw new BadRequestException('La plataforma no tiene suscripción propia.');
+    }
     const sub = await this.ensureSubscription(tenantId);
     if (this.enabled) {
       // Aquí iría: stripe.setupIntents.create({ customer }) → client_secret real.
@@ -78,6 +81,15 @@ export class BillingService {
   }
 
   async status(tenantId: string) {
+    // La plataforma (super-admin) NO paga suscripción de sí misma: solo gestión de Meta.
+    if (tenantId === 'platform') {
+      return {
+        enabled: this.enabled,
+        meta: await this.metaPaymentStatus(tenantId),
+        subscription: null,
+        paymentMethods: [],
+      };
+    }
     const [methods, sub, meta] = await Promise.all([
       this.prisma.paymentMethod.findMany({
         where: { tenantId, status: { not: 'removed' } },

@@ -11,6 +11,7 @@ import { RequestIdInterceptor } from './request-id.interceptor';
 import { MetricsService } from './metrics.service';
 import { MetricsController } from './metrics.controller';
 import { MetricsInterceptor } from './metrics.interceptor';
+import { PlatformOnlyGuard } from '../auth/platform-only.guard';
 
 // APP_FILTER y APP_INTERCEPTOR se aplican globalmente aunque se declaren aquí.
 // Registramos las colas (solo para leer sus contadores en /metrics).
@@ -23,6 +24,7 @@ import { MetricsInterceptor } from './metrics.interceptor';
   providers: [
     ErrorLogsService,
     MetricsService,
+    PlatformOnlyGuard,
     { provide: APP_INTERCEPTOR, useClass: RequestIdInterceptor },
     { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

@@ -12,7 +12,7 @@ export class ConversationsController {
 
   @Get()
   list(@CurrentUser() user: AuthUser, @Query('filter') filter?: string) {
-    return this.conversations.list(user.tenantId, filter, user.userId);
+    return this.conversations.list(user.tenantId, filter, user.userId, user.role);
   }
 
   @Get(':id/messages')
@@ -25,33 +25,37 @@ export class ConversationsController {
     return this.conversations.history(
       user.tenantId,
       id,
+      user.userId,
+      user.role,
       limit ? Number(limit) : undefined,
       before,
     );
   }
 
   @Post(':id/messages')
-  send(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+  async send(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+    // Un agente solo envía en conversaciones suyas o abiertas.
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
     return this.messaging.send(user.tenantId, id, body);
   }
 
   @Post(':id/assign')
   assign(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
-    return this.conversations.assign(user.tenantId, id, body?.userId, user.userId);
+    return this.conversations.assign(user.tenantId, id, body?.userId, user.userId, user.role);
   }
 
   @Patch(':id/status')
   setStatus(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
-    return this.conversations.setStatus(user.tenantId, id, body?.status);
+    return this.conversations.setStatus(user.tenantId, id, body?.status, user.userId, user.role);
   }
 
   @Get(':id/notes')
   listNotes(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.conversations.listNotes(user.tenantId, id);
+    return this.conversations.listNotes(user.tenantId, id, user.userId, user.role);
   }
 
   @Post(':id/notes')
   addNote(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
-    return this.conversations.addNote(user.tenantId, id, user.userId, body?.body);
+    return this.conversations.addNote(user.tenantId, id, user.userId, user.role, body?.body);
   }
 }

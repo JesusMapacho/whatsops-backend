@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   PERMISSIONS,
+  PERMISSION_CATALOG,
   PermissionKey,
   SYSTEM_ROLE_PERMISSIONS,
 } from '../auth/permissions.catalog';
@@ -93,8 +94,9 @@ export class RolesService implements OnModuleInit {
 
   // --- API de administración (scoped por tenant) ---
 
+  // Catálogo enriquecido (key/label/group/description) para la matriz de la UI.
   listCatalog() {
-    return PERMISSIONS.map((key) => ({ key }));
+    return PERMISSION_CATALOG;
   }
 
   async list(tenantId: string) {

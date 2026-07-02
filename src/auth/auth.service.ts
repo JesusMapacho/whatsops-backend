@@ -42,7 +42,8 @@ export class AuthService {
           },
         });
       });
-      return this.sign(user.id, user.tenantId, user.role, user.roleId);
+      // Tenant recién creado: onboarding pendiente.
+      return this.sign(user.id, user.tenantId, user.role, user.roleId, false);
     } catch (e: any) {
       if (e?.code === 'P2002') {
         throw new ConflictException('El email ya está registrado');
@@ -58,7 +59,7 @@ export class AuthService {
     // selector de tenant en login.
     const user = await this.prisma.user.findFirst({
       where: { email },
-      include: { tenant: { select: { status: true } } },
+      include: { tenant: { select: { status: true, onboardingComplete: true } } },
     });
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       throw new UnauthorizedException('Credenciales inválidas');
@@ -71,7 +72,13 @@ export class AuthService {
     if (user.tenant?.status === 'suspended') {
       throw new UnauthorizedException('Tenant suspendido');
     }
-    return this.sign(user.id, user.tenantId, user.role, user.roleId);
+    return this.sign(
+      user.id,
+      user.tenantId,
+      user.role,
+      user.roleId,
+      user.tenant?.onboardingComplete ?? true,
+    );
   }
 
   async me(auth: AuthUser) {
@@ -85,11 +92,15 @@ export class AuthService {
         status: true,
         isPlatform: true,
         tenantId: true,
+        emailVerified: true,
+        phoneVerified: true,
+        tenant: { select: { onboardingComplete: true } },
       },
     });
     if (!user) throw new UnauthorizedException('Usuario no encontrado');
     const permissions = await this.roles.permissionKeysFor(user.role, user.roleId);
-    return { ...user, permissions };
+    const { tenant, ...rest } = user;
+    return { ...rest, onboardingComplete: tenant?.onboardingComplete ?? true, permissions };
   }
 
   private async sign(
@@ -97,8 +108,12 @@ export class AuthService {
     tenantId: string,
     role: string,
     roleId: string | null,
+    onboardingComplete: boolean,
   ) {
     const accessToken = await this.jwt.signAsync({ sub: userId, tenantId, role, roleId });
-    return { accessToken, user: { id: userId, tenantId, role, roleId } };
+    return {
+      accessToken,
+      user: { id: userId, tenantId, role, roleId, onboardingComplete },
+    };
   }
 }

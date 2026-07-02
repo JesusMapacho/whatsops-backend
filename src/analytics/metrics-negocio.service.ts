@@ -15,14 +15,15 @@ export class MetricsNegocioService {
   constructor(private readonly prisma: PrismaService) {}
 
   // Agregados de negocio del tenant. Todo en SQL/Prisma (sin traer mensajes a
-  // memoria). Rango topado a 90 días.
-  async summary(tenantId: string, range: DateRange) {
+  // memoria). Rango topado a 90 días. Si se pasa assignedUserId, acota a las
+  // conversaciones de ese agente (métricas propias del agente).
+  async summary(tenantId: string, range: DateRange, assignedUserId?: string) {
     const { from, to } = this.clampRange(range);
 
     const [messagesByDay, conversationsByStatus, firstResponseByAgent] = await Promise.all([
-      this.messagesByDay(tenantId, from, to),
-      this.conversationsByStatus(tenantId, from, to),
-      this.firstResponseByAgent(tenantId, from, to),
+      this.messagesByDay(tenantId, from, to, assignedUserId),
+      this.conversationsByStatus(tenantId, from, to, assignedUserId),
+      this.firstResponseByAgent(tenantId, from, to, assignedUserId),
     ]);
 
     const totals = {
@@ -42,12 +43,15 @@ export class MetricsNegocioService {
   }
 
   // Serie temporal de mensajes in/out por día (date_trunc en Postgres).
-  private async messagesByDay(tenantId: string, from: Date, to: Date) {
+  private async messagesByDay(tenantId: string, from: Date, to: Date, assignedUserId?: string) {
+    const agentFilter = assignedUserId
+      ? Prisma.sql`AND "conversationId" IN (SELECT id FROM "Conversation" WHERE "assignedUserId" = ${assignedUserId})`
+      : Prisma.empty;
     const rows = await this.prisma.$queryRaw<{ day: Date; direction: string; count: bigint }[]>(
       Prisma.sql`
         SELECT date_trunc('day', "createdAt") AS day, "direction"::text AS direction, count(*)::bigint AS count
         FROM "Message"
-        WHERE "tenantId" = ${tenantId} AND "createdAt" BETWEEN ${from} AND ${to}
+        WHERE "tenantId" = ${tenantId} AND "createdAt" BETWEEN ${from} AND ${to} ${agentFilter}
         GROUP BY 1, 2
         ORDER BY 1 ASC
       `,
@@ -64,10 +68,10 @@ export class MetricsNegocioService {
     return [...byDay.values()];
   }
 
-  private async conversationsByStatus(tenantId: string, from: Date, to: Date) {
+  private async conversationsByStatus(tenantId: string, from: Date, to: Date, assignedUserId?: string) {
     const rows = await this.prisma.conversation.groupBy({
       by: ['status'],
-      where: { tenantId, createdAt: { gte: from, lte: to } },
+      where: { tenantId, createdAt: { gte: from, lte: to }, ...(assignedUserId ? { assignedUserId } : {}) },
       _count: { _all: true },
     });
     return rows.map((r) => ({ status: r.status, count: r._count._all }));
@@ -75,7 +79,10 @@ export class MetricsNegocioService {
 
   // Tiempo de primera respuesta por agente: primer outbound - primer inbound de
   // cada conversación, promediado por assignedUserId. Todo en una query.
-  private async firstResponseByAgent(tenantId: string, from: Date, to: Date) {
+  private async firstResponseByAgent(tenantId: string, from: Date, to: Date, assignedUserId?: string) {
+    const agentFilter = assignedUserId
+      ? Prisma.sql`AND c."assignedUserId" = ${assignedUserId}`
+      : Prisma.empty;
     const rows = await this.prisma.$queryRaw<
       { agent: string | null; avgSeconds: number | null; n: bigint }[]
     >(
@@ -93,7 +100,7 @@ export class MetricsNegocioService {
                count(*)::bigint AS n
         FROM firsts f
         JOIN "Conversation" c ON c.id = f."conversationId"
-        WHERE f.first_in IS NOT NULL AND f.first_out IS NOT NULL AND f.first_out > f.first_in
+        WHERE f.first_in IS NOT NULL AND f.first_out IS NOT NULL AND f.first_out > f.first_in ${agentFilter}
         GROUP BY c."assignedUserId"
         ORDER BY "avgSeconds" ASC
       `,

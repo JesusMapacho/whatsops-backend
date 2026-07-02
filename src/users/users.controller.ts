@@ -21,7 +21,8 @@ export class UsersController {
     return this.users.create(user.tenantId, body);
   }
 
-  // Cualquier usuario autenticado ve los usuarios de su propio tenant.
+  // Solo quien gestiona usuarios (admin) los lista; un agente no ve el apartado.
+  @RequirePermissions('users:manage')
   @Get()
   list(@CurrentUser() user: AuthUser) {
     return this.users.list(user.tenantId);

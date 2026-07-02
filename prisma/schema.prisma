@@ -46,6 +46,14 @@ model Tenant {
   name      String
   plan      String   @default("free")
   status    String   @default("active")
+  // Datos de empresa (internacional) capturados en el onboarding.
+  country   String? // ISO-3166-1 alpha-2
+  timezone  String? // IANA
+  currency  String? // ISO-4217
+  locale    String? // BCP-47 / locale
+  // Estado del registro por pasos (admin-v2 feature 03).
+  onboardingStep     Int     @default(1)
+  onboardingComplete Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -146,6 +154,9 @@ model User {
   roleId       String?
   status       String   @default("active") // active | disabled
   isPlatform   Boolean  @default(false)    // super-admin operador (cross-tenant)
+  phone         String?  // E.164
+  phoneVerified Boolean  @default(false)
+  emailVerified Boolean  @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -153,9 +164,29 @@ model User {
   roleRef             Role?          @relation(fields: [roleId], references: [id], onDelete: SetNull)
   assignedConversations Conversation[] @relation("AssignedAgent")
   notes               Note[]
+  verificationCodes   VerificationCode[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
+}
+
+// Código de verificación de un solo uso. Se guarda SOLO el hash del código
+// (nunca el valor en claro), con expiración, tope de intentos y rate-limit por
+// createdAt. Purpose/channel son strings validados en código.
+model VerificationCode {
+  id         String    @id @default(cuid())
+  userId     String
+  channel    String // email | sms | whatsapp
+  purpose    String // password_reset | email_verify | phone_verify
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
 }
 
 model WabaConnection {

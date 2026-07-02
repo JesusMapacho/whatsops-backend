@@ -7,9 +7,12 @@ export interface ErrorLogFilters {
   statusCode?: number;
   path?: string;
   userId?: string;
+  email?: string;
+  tenantId?: string;
   from?: Date;
   to?: Date;
   text?: string;
+  excludeAudit?: boolean;
 }
 
 @Injectable()
@@ -77,9 +80,21 @@ export class ErrorLogsService implements OnModuleInit {
   async list(tenantId: string | null, filters: ErrorLogFilters, limit = 50, before?: string) {
     const where: Prisma.ErrorLogWhereInput = {};
     if (tenantId !== null) where.tenantId = tenantId;
+    // Filtro explícito de tenant (para el super-admin buscar un cliente concreto).
+    if (filters.tenantId) where.tenantId = filters.tenantId;
     if (filters.statusCode) where.statusCode = filters.statusCode;
     if (filters.path) where.path = { contains: filters.path, mode: 'insensitive' };
     if (filters.userId) where.userId = filters.userId;
+    // Búsqueda por correo: ErrorLog solo guarda userId; resolvemos los userId del email.
+    if (filters.email) {
+      const users = await this.prisma.user.findMany({
+        where: { email: { contains: filters.email, mode: 'insensitive' } },
+        select: { id: true },
+      });
+      where.userId = { in: users.map((u) => u.id) };
+    }
+    // La consola muestra errores reales; excluye las filas de auditoría de plataforma.
+    if (filters.excludeAudit) where.errorCode = { not: 'PLATFORM_AUDIT' };
     if (filters.text) where.errorMessage = { contains: filters.text, mode: 'insensitive' };
     if (filters.from || filters.to) {
       where.createdAt = {};
@@ -117,5 +132,17 @@ export class ErrorLogsService implements OnModuleInit {
     const log = await this.prisma.errorLog.findFirst({ where });
     if (!log) throw new NotFoundException('ErrorLog no encontrado');
     return log;
+  }
+
+  // Rutas distintas presentes en los logs (excluye auditoría), para el select de
+  // filtro. Se actualiza solo: al aparecer una ruta nueva, aparece aquí.
+  async paths(): Promise<string[]> {
+    const rows = await this.prisma.errorLog.findMany({
+      where: { errorCode: { not: 'PLATFORM_AUDIT' } },
+      distinct: ['path'],
+      select: { path: true },
+      orderBy: { path: 'asc' },
+    });
+    return rows.map((r) => r.path);
   }
 }
