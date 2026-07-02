@@ -25,6 +25,8 @@ export class AuthService {
       typeof body?.tenantName === 'string' && body.tenantName.trim()
         ? body.tenantName.trim()
         : email;
+    const firstName = typeof body?.firstName === 'string' && body.firstName.trim() ? body.firstName.trim() : null;
+    const lastName = typeof body?.lastName === 'string' && body.lastName.trim() ? body.lastName.trim() : null;
     const passwordHash = await bcrypt.hash(password, 10);
 
     try {
@@ -37,6 +39,8 @@ export class AuthService {
             tenantId: tenant.id,
             email,
             passwordHash,
+            firstName,
+            lastName,
             role: 'admin',
             roleId: adminRoleId,
           },
