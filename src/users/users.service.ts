@@ -19,11 +19,14 @@ export class UsersService {
     const { email, password } = validateCredentials(body?.email, body?.password);
     const role: UserRole = body?.role === 'admin' ? 'admin' : 'agent';
     const passwordHash = await bcrypt.hash(password, 10);
+    // Nombre y apellido opcionales al dar de alta.
+    const firstName = typeof body?.firstName === 'string' && body.firstName.trim() ? body.firstName.trim() : null;
+    const lastName = typeof body?.lastName === 'string' && body.lastName.trim() ? body.lastName.trim() : null;
     // Mapea el enum al rol de sistema del tenant para poblar roleId (RBAC).
     const roleId = await this.systemRoleId(tenantId, role);
     try {
       const user = await this.prisma.user.create({
-        data: { tenantId, email, passwordHash, role, roleId },
+        data: { tenantId, email, passwordHash, role, roleId, firstName, lastName },
       });
       return this.toPublic(user);
     } catch (e: any) {
@@ -129,10 +132,14 @@ export class UsersService {
     roleId?: string | null;
     status?: string;
     tenantId: string;
+    firstName?: string | null;
+    lastName?: string | null;
   }) {
     return {
       id: u.id,
       email: u.email,
+      firstName: u.firstName ?? null,
+      lastName: u.lastName ?? null,
       role: u.role,
       roleId: u.roleId ?? null,
       status: u.status ?? 'active',
