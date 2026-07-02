@@ -24,11 +24,19 @@ export class ProfileService {
     return this.toPublic(u);
   }
 
-  // Edición de datos básicos del propio perfil. Cambiar el email lo marca como
-  // no verificado (habría que re-verificarlo).
+  // Edición de datos del propio perfil: información de la persona (nombre y
+  // apellido) e información de cuenta (email). El puesto (rol) no se auto-asigna.
   async update(userId: string, body: any) {
     const u = await this.mustFind(userId);
     const data: any = {};
+
+    for (const f of ['firstName', 'lastName'] as const) {
+      if (body?.[f] !== undefined) {
+        const v = String(body[f] ?? '').trim();
+        data[f] = v || null; // vaciar el campo se guarda como null
+      }
+    }
+
     if (typeof body?.email === 'string' && body.email.trim()) {
       const email = body.email.trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -41,8 +49,8 @@ export class ProfileService {
     }
     if (!Object.keys(data).length) return this.toPublic(u);
     try {
-      const updated = await this.prisma.user.update({ where: { id: userId }, data });
-      return this.toPublic(updated);
+      await this.prisma.user.update({ where: { id: userId }, data });
+      return this.get(userId);
     } catch (e: any) {
       if (e?.code === 'P2002') throw new BadRequestException('El email ya existe en este tenant');
       throw e;
@@ -92,11 +100,11 @@ export class ProfileService {
     await this.mustFind(userId);
     const phone = String(body?.phone ?? '').trim();
     if (!E164.test(phone)) throw new BadRequestException('Teléfono inválido (formato E.164, ej. +5215555555555)');
-    const updated = await this.prisma.user.update({
+    await this.prisma.user.update({
       where: { id: userId },
       data: { phone, phoneVerified: false },
     });
-    return this.toPublic(updated);
+    return this.get(userId);
   }
 
   async requestPhoneCode(userId: string, body: any) {
@@ -114,7 +122,10 @@ export class ProfileService {
   }
 
   private async mustFind(userId: string) {
-    const u = await this.prisma.user.findUnique({ where: { id: userId } });
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { roleRef: { select: { name: true } } },
+    });
     if (!u) throw new NotFoundException('Usuario no encontrado');
     return u;
   }
@@ -123,14 +134,20 @@ export class ProfileService {
     id: string;
     email: string;
     role: string;
+    firstName: string | null;
+    lastName: string | null;
     phone: string | null;
     phoneVerified: boolean;
     emailVerified: boolean;
+    roleRef?: { name: string } | null;
   }) {
     return {
       id: u.id,
       email: u.email,
-      role: u.role,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      // Puesto = nombre del rol asignado (o el rol de sistema si no hay uno custom).
+      puesto: u.roleRef?.name ?? u.role,
       phone: u.phone,
       phoneVerified: u.phoneVerified,
       emailVerified: u.emailVerified,

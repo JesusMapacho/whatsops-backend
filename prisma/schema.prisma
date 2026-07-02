@@ -154,6 +154,8 @@ model User {
   roleId       String?
   status       String   @default("active") // active | disabled
   isPlatform   Boolean  @default(false)    // super-admin operador (cross-tenant)
+  firstName     String?
+  lastName      String?
   phone         String?  // E.164
   phoneVerified Boolean  @default(false)
   emailVerified Boolean  @default(false)

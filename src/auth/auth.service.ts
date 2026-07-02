@@ -92,6 +92,8 @@ export class AuthService {
         status: true,
         isPlatform: true,
         tenantId: true,
+        firstName: true,
+        lastName: true,
         emailVerified: true,
         phoneVerified: true,
         tenant: { select: { onboardingComplete: true } },
