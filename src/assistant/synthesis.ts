@@ -31,7 +31,7 @@ const SynthesisSchema = z.object({
 // Filtra acciones a rutas conocidas (no confiar en rutas inventadas por el LLM).
 function safeActions(actions: UiAction[]): UiAction[] {
   return actions.filter(
-    (a) => a.type === 'navigate' && (ALLOWED_ROUTES as readonly string[]).includes(a.target),
+    (a) => a.type === 'navigate' && !!a.target && (ALLOWED_ROUTES as readonly string[]).includes(a.target),
   );
 }
 

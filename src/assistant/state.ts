@@ -9,9 +9,11 @@ export interface BranchResult {
 }
 
 export interface UiAction {
-  type: 'navigate' | 'open';
-  target: string; // ruta Angular o URL
+  type: 'navigate' | 'confirm';
+  target?: string; // navigate: ruta Angular
   label?: string;
+  // confirm: payload para POST /assistant/confirm (mutación destructiva ya resuelta).
+  confirm?: { tool: string; conversationId: string; args?: { status?: string; note?: string } };
 }
 
 // Estado del grafo. tenantId/role/userId son datos de CONFIANZA del backend (JWT),

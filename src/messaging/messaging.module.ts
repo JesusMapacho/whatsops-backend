@@ -13,5 +13,6 @@ import { CannedResponsesController } from './canned-responses.controller';
   imports: [PrismaModule, CryptoModule, EventsModule],
   controllers: [ConversationsController, TemplatesController, CannedResponsesController],
   providers: [MessagingService, ConversationsService, CannedResponsesService],
+  exports: [ConversationsService],
 })
 export class MessagingModule {}
