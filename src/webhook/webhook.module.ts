@@ -2,6 +2,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { EventsModule } from '../events/events.module';
+import { CryptoModule } from '../crypto/crypto.module';
+import { StorageModule } from '../storage/storage.module';
 import { WebhookController } from './webhook.controller';
 import { WebhookEventsController } from './webhook-events.controller';
 import { WebhookService, WEBHOOK_QUEUE } from './webhook.service';
@@ -12,6 +14,8 @@ import { WebhookProcessor } from './webhook.processor';
   imports: [
     PrismaModule,
     EventsModule,
+    CryptoModule,
+    StorageModule,
     BullModule.registerQueue({
       name: WEBHOOK_QUEUE,
       defaultJobOptions: {

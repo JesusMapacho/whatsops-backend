@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
+import { StorageService } from '../storage/storage.service';
+import { withMediaUrl } from './media.util';
 import { buildConversationWhere, conversationScopeWhere, parseStatus } from './conversations.util';
 
 @Injectable()
@@ -8,6 +10,7 @@ export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsGateway,
+    private readonly storage: StorageService,
   ) {}
 
   async list(tenantId: string, filter: string | undefined, userId: string, role: string) {
@@ -61,7 +64,8 @@ export class ConversationsService {
       data: { lastReadAt: new Date() },
     });
 
-    return page.reverse();
+    // Adjunta una mediaUrl firmada y temporal a los mensajes con adjunto.
+    return page.reverse().map((m) => withMediaUrl(m, (k) => this.storage.signedUrl(k)));
   }
 
   async assign(tenantId: string, id: string, targetUserId: string | undefined, currentUserId: string, role: string) {

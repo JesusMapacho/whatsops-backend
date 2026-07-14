@@ -1,5 +1,16 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
-import { MessagingService } from './messaging.service';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { MessagingService, UploadedMediaFile } from './messaging.service';
 import { ConversationsService } from './conversations.service';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 
@@ -37,6 +48,19 @@ export class ConversationsController {
     // Un agente solo envía en conversaciones suyas o abiertas.
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
     return this.messaging.send(user.tenantId, id, body);
+  }
+
+  @Post(':id/media')
+  // 100 MB = tope de documento de Meta; multer rechaza antes de bufferizar de más.
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
+  async sendMedia(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedMediaFile,
+    @Body('caption') caption?: string,
+  ) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.messaging.sendMedia(user.tenantId, id, file, caption);
   }
 
   @Post(':id/assign')
