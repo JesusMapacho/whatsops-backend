@@ -54,6 +54,9 @@ model Tenant {
   // Estado del registro por pasos (admin-v2 feature 03).
   onboardingStep     Int     @default(1)
   onboardingComplete Boolean @default(false)
+  // Branding white-label (v2 feature 16). name (arriba) = nombre del negocio.
+  accentColor String? // hex #rrggbb; null = usa el acento por defecto del sistema
+  logoKey     String? // key de StorageService; null = sin logo
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

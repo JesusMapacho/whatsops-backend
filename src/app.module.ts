@@ -19,6 +19,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { ProfileModule } from './profile/profile.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { AssistantModule } from './assistant/assistant.module';
+import { BrandingModule } from './branding/branding.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
@@ -57,6 +58,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     ProfileModule,
     OnboardingModule,
     AssistantModule,
+    BrandingModule,
   ],
   controllers: [HealthController],
   providers: [
