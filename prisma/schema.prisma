@@ -17,6 +17,13 @@ enum WabaSource {
   manual_token
 }
 
+// Canal de mensajería de Meta. Multi-canal (v2 feature 15).
+enum Platform {
+  whatsapp
+  instagram
+  messenger
+}
+
 enum ConversationStatus {
   open
   pending
@@ -197,10 +204,12 @@ model VerificationCode {
 model WabaConnection {
   id              String     @id @default(cuid())
   tenantId        String
-  wabaId          String?
+  platform        Platform   @default(whatsapp)
+  wabaId          String? // WhatsApp only
+  // Id externo del canal: phone_number_id (WA) / page id (Messenger) / IG id.
   phoneNumberId   String
   accessTokenEnc  String
-  businessId      String?
+  businessId      String? // WhatsApp only
   source          WabaSource
   status          String     @default("active")
   createdAt       DateTime   @default(now())
@@ -209,13 +218,15 @@ model WabaConnection {
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
+  @@unique([platform, phoneNumberId])
   @@index([tenantId])
-  @@index([phoneNumberId])
 }
 
 model Contact {
   id        String   @id @default(cuid())
   tenantId  String
+  platform  Platform @default(whatsapp)
+  // Id externo del usuario en el canal: wa_id (WA) / PSID (Messenger) / IGSID (IG).
   waId      String
   name      String?
   createdAt DateTime @default(now())
@@ -224,13 +235,14 @@ model Contact {
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
 
-  @@unique([tenantId, waId])
+  @@unique([tenantId, platform, waId])
   @@index([tenantId])
 }
 
 model Conversation {
   id               String             @id @default(cuid())
   tenantId         String
+  platform         Platform           @default(whatsapp)
   contactId        String
   wabaConnectionId String
   status           ConversationStatus @default(open)

@@ -9,8 +9,9 @@ export interface SchemaDoc {
 export const SCHEMA_DOCS: SchemaDoc[] = [
   {
     id: 'Conversation',
-    content: `Tabla "Conversation": una conversación de WhatsApp con un contacto.
-Columnas: id (text), "tenantId" (text), "contactId" (FK -> "Contact".id), "wabaConnectionId" (FK -> "WabaConnection".id),
+    content: `Tabla "Conversation": una conversación con un contacto por algún canal de Meta.
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
+"contactId" (FK -> "Contact".id), "wabaConnectionId" (FK -> "WabaConnection".id),
 status (enum: 'open' | 'pending' | 'closed'), "assignedUserId" (FK -> usuario asignado, puede ser NULL),
 "lastInboundAt" (timestamp del último mensaje entrante), "lastReadAt" (timestamp de última lectura),
 "createdAt", "updatedAt".
@@ -26,9 +27,10 @@ Uso: contar mensajes, entrantes ('in') vs salientes ('out'), por conversación o
   },
   {
     id: 'Contact',
-    content: `Tabla "Contact": persona de WhatsApp con la que se conversa.
-Columnas: id (text), "tenantId" (text), "waId" (número/ID de WhatsApp), name (text, puede ser NULL),
-"createdAt", "updatedAt". Único por ("tenantId","waId").
+    content: `Tabla "Contact": persona con la que se conversa por algún canal de Meta.
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
+"waId" (id externo del usuario: wa_id / PSID / IGSID), name (text, puede ser NULL),
+"createdAt", "updatedAt". Único por ("tenantId",platform,"waId").
 Uso: buscar contactos por nombre o waId; relacionar con "Conversation"."contactId".`,
   },
   {
@@ -53,8 +55,9 @@ Columnas: id (text), "tenantId" (text), title (text), body (text), "createdAt", 
   },
   {
     id: 'WabaConnection',
-    content: `Tabla "WabaConnection": conexión a un número de WhatsApp Business (WABA).
-Columnas: id (text), "tenantId" (text), "wabaId" (text, NULL), "phoneNumberId" (text),
+    content: `Tabla "WabaConnection": conexión a un canal de Meta (WhatsApp / Instagram / Messenger).
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
+"wabaId" (text, NULL, WhatsApp), "phoneNumberId" (text, id externo del canal),
 "businessId" (text, NULL), source (enum: 'embedded_signup'|'manual_token'), status (text, default 'active'),
 "createdAt", "updatedAt". NUNCA exponer "accessTokenEnc" (token cifrado, secreto).
 Uso: listar conexiones y su estado. No seleccionar la columna del token.`,

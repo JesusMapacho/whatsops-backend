@@ -5,18 +5,15 @@ import { CryptoService } from '../crypto/crypto.service';
 import { EventsGateway } from '../events/events.gateway';
 import {
   SendDto,
-  buildMessagePayload,
   isWithinWindow,
-  mapGraphError,
   templateBody,
 } from './messaging.util';
 import {
-  buildMediaPayload,
-  downloadFromGraph,
   uploadToGraph,
   validateMedia,
   withMediaUrl,
 } from './media.util';
+import { channelAdapter } from './channels';
 import { StorageService } from '../storage/storage.service';
 
 // Archivo subido (forma mínima de multer; evita depender de @types/multer).
@@ -33,6 +30,10 @@ const GRAPH_VERSION = 'v22.0';
 @Injectable()
 export class MessagingService {
   private readonly graphVersion: string;
+  // Base pública para que Meta (Messenger/IG) pueda descargar nuestro media por URL.
+  // ponytail: en dev suele quedar vacío (Meta no alcanza localhost); el round-trip
+  // real de media en esos canales se verifica en un entorno con URL pública.
+  private readonly publicBaseUrl: string;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -42,6 +43,7 @@ export class MessagingService {
     config: ConfigService,
   ) {
     this.graphVersion = config.get<string>('GRAPH_API_VERSION') ?? GRAPH_VERSION;
+    this.publicBaseUrl = config.get<string>('PUBLIC_BASE_URL') ?? '';
   }
 
   async send(tenantId: string, conversationId: string, body: any) {
@@ -53,17 +55,17 @@ export class MessagingService {
     });
     if (!conv) throw new NotFoundException('Conversación no encontrada');
 
+    const adapter = channelAdapter(conv.platform);
+    if (dto.type === 'template' && !adapter.supportsTemplate) {
+      throw new BadRequestException('Las plantillas solo aplican a WhatsApp.');
+    }
     if (dto.type === 'text' && !isWithinWindow(conv.lastInboundAt)) {
-      throw new BadRequestException(
-        'Ventana de 24 h cerrada: solo se permiten mensajes de plantilla.',
-      );
+      throw new BadRequestException(adapter.windowClosedMessage);
     }
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
-    const payload = buildMessagePayload(conv.contact.waId, dto);
-    const url = `https://graph.facebook.com/${this.graphVersion}/${encodeURIComponent(
-      conv.wabaConnection.phoneNumberId,
-    )}/messages`;
+    const payload = adapter.buildText(conv.contact.waId, dto);
+    const url = adapter.sendUrl(conv.wabaConnection.phoneNumberId, this.graphVersion);
 
     let res: Response;
     let json: any;
@@ -93,7 +95,7 @@ export class MessagingService {
           status: 'failed',
         },
       });
-      throw new BadRequestException(mapGraphError(json));
+      throw new BadRequestException(adapter.mapError(json));
     }
 
     const message = await this.prisma.message.create({
@@ -132,15 +134,14 @@ export class MessagingService {
       include: { contact: true, wabaConnection: true },
     });
     if (!conv) throw new NotFoundException('Conversación no encontrada');
+    const adapter = channelAdapter(conv.platform);
     if (!isWithinWindow(conv.lastInboundAt)) {
-      throw new BadRequestException(
-        'Ventana de 24 h cerrada: solo se permiten mensajes de plantilla.',
-      );
+      throw new BadRequestException(adapter.windowClosedMessage);
     }
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
     const filename = kind === 'document' ? file.originalname : undefined;
-    // Guardamos una copia propia (para el hilo) y subimos a Meta (para enviar).
+    // Guardamos una copia propia (para el hilo).
     const mediaKey = await this.storage.put(file.buffer, file.mimetype, filename);
     const dbPayload = {
       kind,
@@ -150,25 +151,27 @@ export class MessagingService {
       ...(caption ? { caption } : {}),
     };
 
-    let mediaId: string;
+    // WhatsApp: subir el binario a Meta y referenciar por media-id.
+    // Messenger/IG: referenciar por URL pública de nuestro storage.
+    let mediaRef: string;
     try {
-      mediaId = await uploadToGraph(
-        token,
-        this.graphVersion,
-        conv.wabaConnection.phoneNumberId,
-        file.buffer,
-        file.mimetype,
-        file.originalname,
-      );
+      mediaRef = adapter.needsMediaUpload
+        ? await uploadToGraph(
+            token,
+            this.graphVersion,
+            conv.wabaConnection.phoneNumberId,
+            file.buffer,
+            file.mimetype,
+            file.originalname,
+          )
+        : `${this.publicBaseUrl}${this.storage.signedUrl(mediaKey)}`;
     } catch (e) {
       await this.persistFailed(tenantId, conversationId, kind, dbPayload);
       throw new BadRequestException((e as Error).message);
     }
 
-    const graphBody = buildMediaPayload(conv.contact.waId, kind, mediaId, { caption, filename });
-    const url = `https://graph.facebook.com/${this.graphVersion}/${encodeURIComponent(
-      conv.wabaConnection.phoneNumberId,
-    )}/messages`;
+    const graphBody = adapter.buildMedia(conv.contact.waId, kind, mediaRef, { caption, filename });
+    const url = adapter.sendUrl(conv.wabaConnection.phoneNumberId, this.graphVersion);
 
     let res: Response;
     let json: any;
@@ -186,7 +189,7 @@ export class MessagingService {
 
     if (!res.ok) {
       await this.persistFailed(tenantId, conversationId, kind, dbPayload);
-      throw new BadRequestException(mapGraphError(json));
+      throw new BadRequestException(adapter.mapError(json));
     }
 
     const message = await this.prisma.message.create({

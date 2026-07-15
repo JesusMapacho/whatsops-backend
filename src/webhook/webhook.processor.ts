@@ -42,12 +42,13 @@ export class WebhookProcessor extends WorkerHost {
     let tenantId: string | null = null;
     try {
       for (const change of decodeWebhook(event.rawPayload)) {
-        if (!change.phoneNumberId) continue;
-        const conn = await this.prisma.wabaConnection.findFirst({
-          where: { phoneNumberId: change.phoneNumberId },
+        if (!change.channelRef) continue;
+        // Resolución de tenant por (platform, id externo). Único en BD.
+        const conn = await this.prisma.wabaConnection.findUnique({
+          where: { platform_phoneNumberId: { platform: change.platform, phoneNumberId: change.channelRef } },
         });
         if (!conn) {
-          throw new Error(`Sin WabaConnection para phone_number_id ${change.phoneNumberId}`);
+          throw new Error(`Sin conexión ${change.platform} para ${change.channelRef}`);
         }
         tenantId = conn.tenantId;
         for (const msg of change.messages) {
@@ -78,8 +79,8 @@ export class WebhookProcessor extends WorkerHost {
     if (seen) return;
 
     const contact = await this.prisma.contact.upsert({
-      where: { tenantId_waId: { tenantId, waId: msg.from } },
-      create: { tenantId, waId: msg.from, name: msg.contactName },
+      where: { tenantId_platform_waId: { tenantId, platform: conn.platform, waId: msg.from } },
+      create: { tenantId, platform: conn.platform, waId: msg.from, name: msg.contactName },
       update: msg.contactName ? { name: msg.contactName } : {},
     });
 
@@ -93,7 +94,14 @@ export class WebhookProcessor extends WorkerHost {
           data: { lastInboundAt: new Date() },
         })
       : await this.prisma.conversation.create({
-          data: { tenantId, contactId: contact.id, wabaConnectionId: conn.id, status: 'open', lastInboundAt: new Date() },
+          data: {
+            tenantId,
+            platform: conn.platform,
+            contactId: contact.id,
+            wabaConnectionId: conn.id,
+            status: 'open',
+            lastInboundAt: new Date(),
+          },
         });
 
     // Media entrante: descargar de Meta y guardar en storage; el payload se normaliza.
@@ -124,25 +132,44 @@ export class WebhookProcessor extends WorkerHost {
   // persiste el mensaje marcado con error para que el hilo lo muestre.
   private async ingestMedia(conn: WabaConnection, msg: InboundMessage): Promise<object> {
     const kind = msg.type as MediaKind;
-    const raw = (msg.payload as any)?.[kind] ?? {};
-    const mediaId: string | undefined = raw.id;
-    const caption: string | undefined = raw.caption;
-    const filename: string | undefined = raw.filename;
-    if (!mediaId) return { kind, error: true };
+    // WhatsApp entrega un media-id que hay que resolver contra Graph con el token;
+    // Messenger/IG entregan la URL directa del adjunto (no requiere token).
+    if (conn.platform === 'whatsapp') {
+      const raw = (msg.payload as any)?.[kind] ?? {};
+      const mediaId: string | undefined = raw.id;
+      const caption: string | undefined = raw.caption;
+      const filename: string | undefined = raw.filename;
+      if (!mediaId) return { kind, error: true };
+      try {
+        const token = this.crypto.decrypt(conn.accessTokenEnc);
+        const { buffer, mime } = await downloadFromGraph(token, this.graphVersion, mediaId);
+        const mediaKey = await this.storage.put(buffer, mime, filename);
+        return {
+          kind,
+          mediaKey,
+          mimeType: mime,
+          ...(filename ? { filename } : {}),
+          ...(caption ? { caption } : {}),
+        };
+      } catch (err) {
+        this.logger.warn(`No se pudo descargar media ${mediaId}: ${(err as Error).message}`);
+        return { kind, mimeType: raw.mime_type ?? null, ...(caption ? { caption } : {}), error: true };
+      }
+    }
+
+    // Messenger / Instagram: attachments[0].payload.url (URL temporal firmada por Meta).
+    const url: string | undefined = (msg.payload as any)?.attachments?.[0]?.payload?.url;
+    if (!url) return { kind, error: true };
     try {
-      const token = this.crypto.decrypt(conn.accessTokenEnc);
-      const { buffer, mime } = await downloadFromGraph(token, this.graphVersion, mediaId);
-      const mediaKey = await this.storage.put(buffer, mime, filename);
-      return {
-        kind,
-        mediaKey,
-        mimeType: mime,
-        ...(filename ? { filename } : {}),
-        ...(caption ? { caption } : {}),
-      };
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const mime = res.headers.get('content-type') ?? 'application/octet-stream';
+      const mediaKey = await this.storage.put(buffer, mime);
+      return { kind, mediaKey, mimeType: mime };
     } catch (err) {
-      this.logger.warn(`No se pudo descargar media ${mediaId}: ${(err as Error).message}`);
-      return { kind, mimeType: raw.mime_type ?? null, ...(caption ? { caption } : {}), error: true };
+      this.logger.warn(`No se pudo descargar adjunto ${conn.platform}: ${(err as Error).message}`);
+      return { kind, error: true };
     }
   }
 
