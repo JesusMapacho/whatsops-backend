@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { StorageService } from '../storage/storage.service';
@@ -13,9 +14,16 @@ export class ConversationsService {
     private readonly storage: StorageService,
   ) {}
 
-  async list(tenantId: string, filter: string | undefined, userId: string, role: string) {
+  async list(
+    tenantId: string,
+    filter: string | undefined,
+    userId: string,
+    role: string,
+    q?: string,
+    assignedUserId?: string,
+  ) {
     const convs = await this.prisma.conversation.findMany({
-      where: buildConversationWhere(tenantId, filter, userId, role),
+      where: buildConversationWhere(tenantId, filter, userId, role, q, assignedUserId),
       include: {
         contact: true,
         assignedUser: { select: { id: true, email: true } },
@@ -23,19 +31,23 @@ export class ConversationsService {
       orderBy: { updatedAt: 'desc' },
     });
 
-    // ponytail: un count por conversación (N+1). Agrupar con groupBy si la lista crece.
-    return Promise.all(
-      convs.map(async (c) => ({
-        ...c,
-        unread: await this.prisma.message.count({
-          where: {
-            conversationId: c.id,
-            direction: 'in',
-            ...(c.lastReadAt ? { createdAt: { gt: c.lastReadAt } } : {}),
-          },
-        }),
-      })),
-    );
+    // Conteo de no leídos en UNA query: el corte (lastReadAt) es por conversación,
+    // así que un groupBy no basta; se correlaciona con Conversation en SQL crudo.
+    const ids = convs.map((c) => c.id);
+    const rows = ids.length
+      ? await this.prisma.$queryRaw<{ conversationId: string; unread: number }[]>`
+          SELECT m."conversationId", COUNT(*)::int AS unread
+          FROM "Message" m
+          JOIN "Conversation" c ON c.id = m."conversationId"
+          WHERE m."tenantId" = ${tenantId}
+            AND m.direction = 'in'::"MessageDirection"
+            AND (c."lastReadAt" IS NULL OR m."createdAt" > c."lastReadAt")
+            AND m."conversationId" IN (${Prisma.join(ids)})
+          GROUP BY m."conversationId"`
+      : [];
+    const unread = new Map(rows.map((r) => [r.conversationId, Number(r.unread)]));
+
+    return convs.map((c) => ({ ...c, unread: unread.get(c.id) ?? 0 }));
   }
 
   // Lanza si la conversación no existe o el agente no puede acceder (no es suya ni abierta).

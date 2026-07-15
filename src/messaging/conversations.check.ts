@@ -27,6 +27,25 @@ const agentWhere = { tenantId: T, OR: [{ assignedUserId: U }, { status: 'open' }
 assert.deepStrictEqual(buildConversationWhere(T, 'unassigned', U, 'agent'), agentWhere);
 assert.deepStrictEqual(buildConversationWhere(T, undefined, U, 'agent'), agentWhere);
 
+// Búsqueda/assignedUserId: se cuelgan como AND, sin tocar el scope base.
+const searched = buildConversationWhere(T, 'open', U, 'admin', 'Juan') as any;
+assert.strictEqual(searched.tenantId, T);
+assert.strictEqual(searched.status, 'open');
+assert.strictEqual(searched.AND.length, 1);
+assert.ok(searched.AND[0].OR.some((c: any) => c.contact?.name?.contains === 'Juan'));
+// Agente: el scope suyas/abiertas se conserva aunque haya q.
+const agentSearched = buildConversationWhere(T, undefined, U, 'agent', 'hola') as any;
+assert.deepStrictEqual(agentSearched.OR, [{ assignedUserId: U }, { status: 'open' }]);
+assert.strictEqual(agentSearched.AND.length, 1);
+// assignedUserId sin q → un solo AND.
+const byAgent = buildConversationWhere(T, undefined, U, 'admin', undefined, 'u9') as any;
+assert.deepStrictEqual(byAgent.AND, [{ assignedUserId: 'u9' }]);
+// q en blanco no agrega AND.
+assert.deepStrictEqual(buildConversationWhere(T, 'open', U, 'admin', '  '), {
+  tenantId: T,
+  status: 'open',
+});
+
 // parseStatus: acepta el enum, rechaza lo demás.
 assert.strictEqual(parseStatus('closed'), 'closed');
 assert.strictEqual(parseStatus('open'), 'open');

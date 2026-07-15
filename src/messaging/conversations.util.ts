@@ -22,27 +22,48 @@ export function conversationScopeWhere(
   return { id, tenantId, ...agentScope(role, userId) };
 }
 
+// Búsqueda por texto: nombre/waId del contacto o cuerpo del mensaje.
+// ponytail: el cuerpo del mensaje es `string_contains` sobre JSON (case-SENSITIVE
+// en Postgres vía Prisma). Camino de upgrade si crece: full-text con tsvector.
+function searchWhere(q: string): Prisma.ConversationWhereInput {
+  return {
+    OR: [
+      { contact: { name: { contains: q, mode: 'insensitive' } } },
+      { contact: { waId: { contains: q } } },
+      { messages: { some: { payload: { path: ['text', 'body'], string_contains: q } } } },
+    ],
+  };
+}
+
 // Construye el where de la lista de conversaciones según el filtro. Siempre
 // acotado por tenantId; nunca cruza tenants. El agente queda restringido a las
-// suyas + abiertas sin importar el filtro.
+// suyas + abiertas sin importar el filtro. `q`/`assignedUserId` solo restringen.
 export function buildConversationWhere(
   tenantId: string,
   filter: ConversationFilter | string | undefined,
   userId: string,
   role: string,
+  q?: string,
+  assignedUserId?: string,
 ): Prisma.ConversationWhereInput {
+  const extra: Prisma.ConversationWhereInput[] = [];
+  if (q?.trim()) extra.push(searchWhere(q.trim()));
+  if (assignedUserId) extra.push({ assignedUserId });
+  const withExtra = (base: Prisma.ConversationWhereInput): Prisma.ConversationWhereInput =>
+    extra.length ? { ...base, AND: extra } : base;
+
   if (role !== 'admin') {
-    return { tenantId, ...agentScope(role, userId) };
+    return withExtra({ tenantId, ...agentScope(role, userId) });
   }
   switch (filter) {
     case 'mine':
-      return { tenantId, assignedUserId: userId };
+      return withExtra({ tenantId, assignedUserId: userId });
     case 'unassigned':
-      return { tenantId, assignedUserId: null };
+      return withExtra({ tenantId, assignedUserId: null });
     case 'open':
-      return { tenantId, status: 'open' };
+      return withExtra({ tenantId, status: 'open' });
     default:
-      return { tenantId };
+      return withExtra({ tenantId });
   }
 }
 

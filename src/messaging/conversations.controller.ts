@@ -22,8 +22,13 @@ export class ConversationsController {
   ) {}
 
   @Get()
-  list(@CurrentUser() user: AuthUser, @Query('filter') filter?: string) {
-    return this.conversations.list(user.tenantId, filter, user.userId, user.role);
+  list(
+    @CurrentUser() user: AuthUser,
+    @Query('filter') filter?: string,
+    @Query('q') q?: string,
+    @Query('assignedUserId') assignedUserId?: string,
+  ) {
+    return this.conversations.list(user.tenantId, filter, user.userId, user.role, q, assignedUserId);
   }
 
   @Get(':id/messages')
