@@ -23,4 +23,16 @@ export class WabaController {
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.waba.remove(user.tenantId, id);
   }
+
+  // QR de emparejamiento de una conexión WAHA, proxeado: la api key de la
+  // instancia se queda en el servidor.
+  @Get(':id/qr')
+  qr(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.waba.qr(user.tenantId, id);
+  }
+
+  @Post(':id/restart')
+  restart(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.waba.restart(user.tenantId, id);
+  }
 }

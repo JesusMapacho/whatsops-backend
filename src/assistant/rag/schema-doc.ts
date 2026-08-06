@@ -9,8 +9,9 @@ export interface SchemaDoc {
 export const SCHEMA_DOCS: SchemaDoc[] = [
   {
     id: 'Conversation',
-    content: `Tabla "Conversation": una conversación con un contacto por algún canal de Meta.
-Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
+    content: `Tabla "Conversation": una conversación con un contacto por algún canal.
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'|'waha'),
+platform 'waha' = WhatsApp por QR (transporte no oficial); para "WhatsApp" en general, incluir ambos.
 "contactId" (FK -> "Contact".id), "wabaConnectionId" (FK -> "WabaConnection".id),
 status (enum: 'open' | 'pending' | 'closed'), "assignedUserId" (FK -> usuario asignado, puede ser NULL),
 "lastInboundAt" (timestamp del último mensaje entrante), "lastReadAt" (timestamp de última lectura),
@@ -27,9 +28,9 @@ Uso: contar mensajes, entrantes ('in') vs salientes ('out'), por conversación o
   },
   {
     id: 'Contact',
-    content: `Tabla "Contact": persona con la que se conversa por algún canal de Meta.
-Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
-"waId" (id externo del usuario: wa_id / PSID / IGSID), name (text, puede ser NULL),
+    content: `Tabla "Contact": persona con la que se conversa por algún canal.
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'|'waha'),
+"waId" (id externo del usuario: wa_id / PSID / IGSID; en 'waha' es '<numero>@c.us'), name (text, puede ser NULL),
 "createdAt", "updatedAt". Único por ("tenantId",platform,"waId").
 Uso: buscar contactos por nombre o waId; relacionar con "Conversation"."contactId".`,
   },
@@ -55,11 +56,13 @@ Columnas: id (text), "tenantId" (text), title (text), body (text), "createdAt", 
   },
   {
     id: 'WabaConnection',
-    content: `Tabla "WabaConnection": conexión a un canal de Meta (WhatsApp / Instagram / Messenger).
-Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'),
-"wabaId" (text, NULL, WhatsApp), "phoneNumberId" (text, id externo del canal),
-"businessId" (text, NULL), source (enum: 'embedded_signup'|'manual_token'), status (text, default 'active'),
-"createdAt", "updatedAt". NUNCA exponer "accessTokenEnc" (token cifrado, secreto).
+    content: `Tabla "WabaConnection": conexión a un canal (WhatsApp / Instagram / Messenger / WhatsApp por QR).
+Columnas: id (text), "tenantId" (text), platform (enum: 'whatsapp'|'instagram'|'messenger'|'waha'),
+"wabaId" (text, NULL, WhatsApp), "phoneNumberId" (text, id externo del canal; en 'waha' es el nombre de sesión),
+"businessId" (text, NULL), "baseUrl" (text, NULL, URL de la instancia WAHA propia),
+source (enum: 'embedded_signup'|'manual_token'|'waha_qr'),
+status (text: 'active' en Meta; en 'waha' el estado de la sesión: 'WORKING'|'SCAN_QR_CODE'|'FAILED'|…),
+"createdAt", "updatedAt". NUNCA exponer "accessTokenEnc" (token/api key cifrada, secreto).
 Uso: listar conexiones y su estado. No seleccionar la columna del token.`,
   },
 ];

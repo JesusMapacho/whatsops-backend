@@ -33,6 +33,27 @@ export function buildMessagePayload(to: string, dto: SendDto): object {
   return { ...base, type: 'text', text: { body: dto.text } };
 }
 
+// Forma NORMALIZADA que se PERSISTE de un saliente, igual en todos los canales.
+// Distinta de buildMessagePayload, que es el cuerpo que espera Meta.
+//
+// Por qué existen las dos: guardar el cuerpo del proveedor dejaba `payload.text`
+// como string en WAHA (`{session, chatId, text:'hola'}`) y como `message.text` en
+// Messenger, mientras la bandeja, la vista previa y la búsqueda leen
+// `payload.text.body` → burbuja vacía y búsqueda ciega. Se usa la forma de Meta
+// porque es la que ya esperaba el frontend y a la que normalizan los decoders.
+export function storedTextPayload(dto: SendDto): object {
+  if (dto.type === 'template') {
+    return {
+      template: {
+        name: dto.name,
+        language: { code: dto.language },
+        ...(dto.components ? { components: dto.components } : {}),
+      },
+    };
+  }
+  return { text: { body: dto.text } };
+}
+
 // Mapea códigos de error comunes de la Graph API a mensajes accionables.
 // https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes
 export function mapGraphError(json: any): string {

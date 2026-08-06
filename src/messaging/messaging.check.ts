@@ -4,6 +4,7 @@ import {
   buildMessagePayload,
   isWithinWindow,
   mapGraphError,
+  storedTextPayload,
   templateBody,
 } from './messaging.util';
 
@@ -28,6 +29,30 @@ assert.deepStrictEqual(
     type: 'template',
     template: { name: 'bienvenida', language: { code: 'es' } },
   },
+);
+
+// --- Payload PERSISTIDO de un saliente: siempre `text.body`, sea cual sea el canal ---
+// Regresión del bug de la burbuja vacía: se guardaba el cuerpo del proveedor, y en
+// WAHA `text` era un string, así que la bandeja (que lee payload.text.body) pintaba
+// una burbuja vacía y la búsqueda no encontraba nada.
+assert.deepStrictEqual(storedTextPayload({ type: 'text', text: 'hola' }), {
+  text: { body: 'hola' },
+});
+// Nada de fugas del transporte (session/chatId/recipient) a una columna que va al navegador.
+const stored = storedTextPayload({ type: 'text', text: 'hola' }) as any;
+assert.strictEqual(stored.session, undefined);
+assert.strictEqual(stored.chatId, undefined);
+assert.strictEqual(stored.recipient, undefined);
+assert.strictEqual(typeof stored.text, 'object', 'text debe ser objeto, no string');
+
+// Las plantillas conservan la forma que ya leía el frontend (payload.template.name).
+assert.deepStrictEqual(
+  storedTextPayload({ type: 'template', name: 'bienvenida', language: 'es' }),
+  { template: { name: 'bienvenida', language: { code: 'es' } } },
+);
+assert.deepStrictEqual(
+  storedTextPayload({ type: 'template', name: 'x', language: 'es', components: [{ type: 'BODY' }] }),
+  { template: { name: 'x', language: { code: 'es' }, components: [{ type: 'BODY' }] } },
 );
 
 // --- Mapeo de errores ---

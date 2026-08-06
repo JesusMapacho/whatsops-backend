@@ -15,13 +15,25 @@ enum UserRole {
 enum WabaSource {
   embedded_signup
   manual_token
+  waha_qr // emparejado escaneando un QR contra una instancia WAHA (v5 feature 26)
 }
 
-// Canal de mensajería de Meta. Multi-canal (v2 feature 15).
+// Transporte/canal de una conexión. whatsapp/instagram/messenger son canales
+// oficiales de Meta (v2 feature 15); `waha` es WhatsApp por un transporte NO
+// oficial self-hosted (WhatsApp Web vía https://waha.devlike.pro, v5 feature 26).
+//
+// ponytail: waha vive en este enum y no en una columna `provider` ortogonal porque
+// un número no puede estar en Cloud API y en WhatsApp Web a la vez, así que
+// channelAdapter(platform), el @@unique([platform, phoneNumberId]) que resuelve
+// tenant y la pureza sin-DB de decode.ts siguen funcionando sin tocarse.
+// Techo: si un tenant migra WAHA→Cloud API su historial se parte en dos
+// Contact/Conversation. Upgrade: columna `provider` + backfill que reescribe
+// platform='waha'→'whatsapp' y fusiona Contacts por waId normalizado.
 enum Platform {
   whatsapp
   instagram
   messenger
+  waha
 }
 
 enum ConversationStatus {
@@ -206,12 +218,27 @@ model WabaConnection {
   tenantId        String
   platform        Platform   @default(whatsapp)
   wabaId          String? // WhatsApp only
-  // Id externo del canal: phone_number_id (WA) / page id (Messenger) / IG id.
+  // Id externo del canal: phone_number_id (WA) / page id (Messenger) / IG id /
+  // nombre de sesión (WAHA, derivado del tenantId — ver wahaSessionName).
   phoneNumberId   String
+  // Secreto cifrado (AES-256-GCM): access token de Meta / X-Api-Key de la
+  // instancia WAHA. Nunca se expone ni se loguea.
   accessTokenEnc  String
   businessId      String? // WhatsApp only
+  // URL base de la instancia WAHA (BYO). null ⇒ Meta, o la instancia gestionada de env.
+  baseUrl         String?
   source          WabaSource
+  // Meta: 'active'. WAHA: el estado vivo de la sesión (STARTING / SCAN_QR_CODE /
+  // WORKING / FAILED …), alimentado por el evento session.status del webhook.
   status          String     @default("active")
+  // Versión de la lista de eventos suscritos en la sesión de WAHA. La config del
+  // webhook se fija al CREAR la sesión, así que una sesión ya emparejada se queda
+  // con la lista vieja y los eventos nuevos no llegarían nunca, en silencio.
+  // Se compara contra WAHA_EVENTS_VERSION y se re-suscribe una vez.
+  // Es un entero y no una comparación de arrays a propósito: si WAHA devolviera
+  // los eventos reordenados, una comparación que no converge reiniciaría todas
+  // las sesiones de la flota en cada pasada de reconciliación.
+  webhookVersion  Int        @default(0)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
@@ -226,9 +253,18 @@ model Contact {
   id        String   @id @default(cuid())
   tenantId  String
   platform  Platform @default(whatsapp)
-  // Id externo del usuario en el canal: wa_id (WA) / PSID (Messenger) / IGSID (IG).
+  // Id externo del usuario en el canal: wa_id (WA) / PSID (Messenger) / IGSID (IG) /
+  // chatId `<numero>@c.us` (WAHA — se guarda verbatim, así el envío no transforma nada).
   waId      String
   name      String?
+  // Teléfono real en dígitos. Con LID addressing el `waId` NO es un número
+  // (`175647100039313@lid`), y las APIs de chats/historial devuelven `@c.us`:
+  // sin un eje común se crearían dos contactos y dos hilos para la misma persona.
+  // Sale de `_data.key.remoteJidAlt` en los eventos con LID.
+  phone     String?
+  // Chat de grupo (`@g.us`). El "contacto" es entonces el grupo, y el autor de
+  // cada mensaje va en `Message.payload.author`.
+  isGroup   Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -237,6 +273,7 @@ model Contact {
 
   @@unique([tenantId, platform, waId])
   @@index([tenantId])
+  @@index([tenantId, phone])
 }
 
 model Conversation {
@@ -269,14 +306,27 @@ model Message {
   conversationId String
   direction      MessageDirection
   type           String
+  // Además del contenido, lleva lo que no se consulta y solo se renderiza:
+  // `text.body` (normalizado en TODOS los canales), `mediaKey`, `caption`,
+  // `replyToWamid`, `editedAt`, `reactions`, `author` (grupos), `voice`,
+  // `viaDevice` (enviado desde el teléfono del dueño). Nada de eso es columna:
+  // no se filtra ni se ordena por ello, y payload ya viaja por el socket.
   payload        Json
-  wamid          String?          @unique
+  wamid          String?
   status         MessageStatus    @default(sent)
+  // Mensaje borrado por su autor (`message.revoked`). Sí es columna porque se
+  // excluye del SQL de no-leídos y de la búsqueda.
+  deletedAt      DateTime?
   createdAt      DateTime         @default(now())
 
   tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
+  // Único POR TENANT, no global: el id de un mensaje de grupo lo genera el
+  // remitente y es idéntico para todos los destinatarios, así que con un unique
+  // global, en cuanto dos tenants comparten un grupo, el mensaje del segundo se
+  // descartaría en silencio (el peor fallo posible de este producto).
+  @@unique([tenantId, wamid])
   @@index([tenantId])
   @@index([conversationId])
 }

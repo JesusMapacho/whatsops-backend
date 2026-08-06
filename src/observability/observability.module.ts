@@ -4,6 +4,7 @@ import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { PrismaModule } from '../prisma/prisma.module';
 import { WEBHOOK_QUEUE } from '../webhook/webhook.service';
 import { BILLING_QUEUE } from '../billing/billing.service';
+import { WAHA_QUEUE } from '../waha/waha.service';
 import { ErrorLogsService } from './error-logs.service';
 import { ErrorLogsController } from './error-logs.controller';
 import { AllExceptionsFilter } from './all-exceptions.filter';
@@ -18,7 +19,11 @@ import { PlatformOnlyGuard } from '../auth/platform-only.guard';
 @Module({
   imports: [
     PrismaModule,
-    BullModule.registerQueue({ name: WEBHOOK_QUEUE }, { name: BILLING_QUEUE }),
+    BullModule.registerQueue(
+      { name: WEBHOOK_QUEUE },
+      { name: BILLING_QUEUE },
+      { name: WAHA_QUEUE },
+    ),
   ],
   controllers: [ErrorLogsController, MetricsController],
   providers: [

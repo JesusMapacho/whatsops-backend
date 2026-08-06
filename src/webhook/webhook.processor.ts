@@ -12,6 +12,7 @@ import { decodeWebhook, InboundMessage, StatusUpdate } from './decode';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
+const ALLOWED_STATUS = new Set<string>(['sent', 'delivered', 'read', 'failed']);
 const GRAPH_VERSION = 'v22.0';
 
 // Worker de la cola webhook-events. Reintentos/backoff los configura el módulo.
@@ -51,6 +52,14 @@ export class WebhookProcessor extends WorkerHost {
           throw new Error(`Sin conexión ${change.platform} para ${change.channelRef}`);
         }
         tenantId = conn.tenantId;
+        // WAHA reporta el ciclo de vida de la sesión (SCAN_QR_CODE / WORKING /
+        // FAILED …); es lo que la UI de emparejamiento sondea.
+        if (change.sessionStatus && change.sessionStatus !== conn.status) {
+          await this.prisma.wabaConnection.update({
+            where: { id: conn.id },
+            data: { status: change.sessionStatus },
+          });
+        }
         for (const msg of change.messages) {
           await this.handleInbound(conn, msg);
         }
@@ -74,25 +83,41 @@ export class WebhookProcessor extends WorkerHost {
 
   private async handleInbound(conn: WabaConnection, msg: InboundMessage) {
     const tenantId = conn.tenantId;
-    // Idempotencia: wamid ya visto → no duplicar (replay de la feature 06 es seguro).
-    const seen = await this.prisma.message.findUnique({ where: { wamid: msg.wamid } });
+    // Un mensaje puede llegar como saliente: el eco de lo que el dueño manda desde
+    // su propio teléfono (evento message.any de WAHA).
+    const direction = msg.direction ?? 'in';
+    // Idempotencia por (tenant, wamid) — no global: el id de un mensaje de grupo lo
+    // genera el remitente y es el mismo para todos los destinatarios.
+    const seen = await this.prisma.message.findUnique({
+      where: { tenantId_wamid: { tenantId, wamid: msg.wamid } },
+    });
     if (seen) return;
 
     const contact = await this.prisma.contact.upsert({
       where: { tenantId_platform_waId: { tenantId, platform: conn.platform, waId: msg.from } },
-      create: { tenantId, platform: conn.platform, waId: msg.from, name: msg.contactName },
-      update: msg.contactName ? { name: msg.contactName } : {},
+      create: {
+        tenantId,
+        platform: conn.platform,
+        waId: msg.from,
+        name: msg.contactName,
+        ...(msg.phone ? { phone: msg.phone } : {}),
+        ...(msg.isGroup ? { isGroup: true } : {}),
+      },
+      update: {
+        ...(msg.contactName ? { name: msg.contactName } : {}),
+        ...(msg.phone ? { phone: msg.phone } : {}),
+      },
     });
 
     const open = await this.prisma.conversation.findFirst({
       where: { tenantId, contactId: contact.id, wabaConnectionId: conn.id, status: { not: 'closed' } },
       orderBy: { createdAt: 'desc' },
     });
+    // `lastInboundAt` es la fuente de verdad de la ventana de 24 h: un eco NUESTRO
+    // no debe extenderla (en los canales de Meta eso llevaría a un 131047).
+    const touch = direction === 'in' ? { lastInboundAt: new Date() } : {};
     const conversation = open
-      ? await this.prisma.conversation.update({
-          where: { id: open.id },
-          data: { lastInboundAt: new Date() },
-        })
+      ? await this.prisma.conversation.update({ where: { id: open.id }, data: touch })
       : await this.prisma.conversation.create({
           data: {
             tenantId,
@@ -100,7 +125,7 @@ export class WebhookProcessor extends WorkerHost {
             contactId: contact.id,
             wabaConnectionId: conn.id,
             status: 'open',
-            lastInboundAt: new Date(),
+            ...(direction === 'in' ? { lastInboundAt: new Date() } : {}),
           },
         });
 
@@ -109,17 +134,26 @@ export class WebhookProcessor extends WorkerHost {
       ? await this.ingestMedia(conn, msg)
       : (msg.payload as object);
 
-    const created = await this.prisma.message.create({
-      data: {
-        tenantId,
-        conversationId: conversation.id,
-        direction: 'in',
-        type: msg.type,
-        payload,
-        wamid: msg.wamid,
-        status: 'delivered',
-      },
-    });
+    let created;
+    try {
+      created = await this.prisma.message.create({
+        data: {
+          tenantId,
+          conversationId: conversation.id,
+          direction,
+          type: msg.type,
+          payload,
+          wamid: msg.wamid,
+          // Un entrante ya está entregado; un eco nuestro sale del ack que traiga.
+          status: direction === 'in' ? 'delivered' : (msg.status ?? 'sent'),
+        },
+      });
+    } catch (e: any) {
+      // Carrera con nuestro propio envío por API (el POST persiste a la vez que
+      // llega el eco). El otro lado ya guardó la fila: no hay nada que hacer.
+      if (e?.code === 'P2002') return;
+      throw e;
+    }
     this.events.emitToTenant(
       tenantId,
       'message:new',
@@ -157,6 +191,40 @@ export class WebhookProcessor extends WorkerHost {
       }
     }
 
+    // WAHA sirve el binario desde su propia instancia (/api/files/…) y exige la api key.
+    if (conn.platform === 'waha') {
+      const raw = msg.payload as any;
+      const media = raw?.media ?? {};
+      if (!media.url) return { kind, error: true };
+      // El caption de WAHA viene en `body`, no dentro de `media`.
+      const caption: string | undefined = raw?.body || undefined;
+      const filename: string | undefined = media.filename ?? undefined;
+      try {
+        const res = await fetch(media.url, {
+          headers: { 'X-Api-Key': this.crypto.decrypt(conn.accessTokenEnc) },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buffer = Buffer.from(await res.arrayBuffer());
+        const mime = media.mimetype ?? res.headers.get('content-type') ?? 'application/octet-stream';
+        const mediaKey = await this.storage.put(buffer, mime, filename);
+        return {
+          kind,
+          mediaKey,
+          mimeType: mime,
+          ...(filename ? { filename } : {}),
+          ...(caption ? { caption } : {}),
+        };
+      } catch (err) {
+        this.logger.warn(`No se pudo descargar media de WAHA: ${(err as Error).message}`);
+        return {
+          kind,
+          mimeType: media.mimetype ?? null,
+          ...(caption ? { caption } : {}),
+          error: true,
+        };
+      }
+    }
+
     // Messenger / Instagram: attachments[0].payload.url (URL temporal firmada por Meta).
     const url: string | undefined = (msg.payload as any)?.attachments?.[0]?.payload?.url;
     if (!url) return { kind, error: true };
@@ -174,11 +242,18 @@ export class WebhookProcessor extends WorkerHost {
   }
 
   private async handleStatus(tenantId: string, st: StatusUpdate) {
-    const status = st.status as 'sent' | 'delivered' | 'read' | 'failed';
+    // El decoder ya valida, pero rawPayload puede venir de un replay (feature 06)
+    // guardado antes de esa validación: un valor ajeno reventaría el enum.
+    if (!ALLOWED_STATUS.has(st.status)) return;
     const { count } = await this.prisma.message.updateMany({
       where: { tenantId, wamid: st.wamid },
-      data: { status },
+      data: { status: st.status },
     });
-    if (count) this.events.emitToTenant(tenantId, 'message:status', { wamid: st.wamid, status });
+    if (count) {
+      this.events.emitToTenant(tenantId, 'message:status', {
+        wamid: st.wamid,
+        status: st.status,
+      });
+    }
   }
 }

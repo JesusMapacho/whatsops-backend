@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
+import { PLATFORM_TENANT_ID } from './platform.constants';
 
 const PLATFORM_TENANT_NAME = 'WhatsOps Platform';
 
@@ -23,8 +24,8 @@ export class PlatformService implements OnModuleInit {
     if (!email || !password) return; // opcional: sin env, no se siembra
 
     const tenant = await this.prisma.tenant.upsert({
-      where: { id: 'platform' },
-      create: { id: 'platform', name: PLATFORM_TENANT_NAME },
+      where: { id: PLATFORM_TENANT_ID },
+      create: { id: PLATFORM_TENANT_ID, name: PLATFORM_TENANT_NAME },
       update: {},
     });
     const existing = await this.prisma.user.findFirst({ where: { email: email.toLowerCase() } });
@@ -47,7 +48,7 @@ export class PlatformService implements OnModuleInit {
   }
 
   async listTenants(search?: string) {
-    const where: Prisma.TenantWhereInput = { id: { not: 'platform' } };
+    const where: Prisma.TenantWhereInput = { id: { not: PLATFORM_TENANT_ID } };
     if (search) where.name = { contains: search, mode: 'insensitive' };
     const tenants = await this.prisma.tenant.findMany({
       where,
@@ -76,7 +77,7 @@ export class PlatformService implements OnModuleInit {
         _count: { select: { conversations: true, messages: true, wabaConnections: true } },
       },
     });
-    if (!tenant || tenant.id === 'platform') throw new NotFoundException('Tenant no encontrado');
+    if (!tenant || tenant.id === PLATFORM_TENANT_ID) throw new NotFoundException('Tenant no encontrado');
     return {
       id: tenant.id,
       name: tenant.name,
@@ -88,8 +89,54 @@ export class PlatformService implements OnModuleInit {
     };
   }
 
+  // Vista de operación de la capa gratuita: todas las sesiones WAHA de todos los
+  // tenants, con su estado y su volumen del día. Es donde el operador detecta al
+  // que está spameando (y por tanto quemando la reputación de la instancia
+  // compartida) para suspenderlo.
+  async wahaSessions() {
+    const conns = await this.prisma.wabaConnection.findMany({
+      where: { platform: 'waha', tenantId: { not: PLATFORM_TENANT_ID } },
+      // Nunca accessTokenEnc (api key cifrada) ni baseUrl (puede llevar credenciales).
+      select: {
+        id: true,
+        tenantId: true,
+        phoneNumberId: true,
+        status: true,
+        createdAt: true,
+        tenant: { select: { name: true, plan: true, status: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!conns.length) return [];
+
+    // Salientes de las últimas 24 h por tenant, en una sola consulta.
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const sent = await this.prisma.message.groupBy({
+      by: ['tenantId'],
+      where: {
+        direction: 'out',
+        createdAt: { gt: since },
+        tenantId: { in: conns.map((c) => c.tenantId) },
+      },
+      _count: { _all: true },
+    });
+    const sentByTenant = new Map(sent.map((s) => [s.tenantId, s._count._all]));
+
+    return conns.map((c) => ({
+      id: c.id,
+      tenantId: c.tenantId,
+      tenantName: c.tenant.name,
+      plan: c.tenant.plan,
+      tenantStatus: c.tenant.status,
+      session: c.phoneNumberId,
+      status: c.status,
+      createdAt: c.createdAt,
+      sentLast24h: sentByTenant.get(c.tenantId) ?? 0,
+    }));
+  }
+
   async updateTenant(id: string, body: any) {
-    if (id === 'platform') throw new BadRequestException('Tenant de plataforma no editable');
+    if (id === PLATFORM_TENANT_ID) throw new BadRequestException('Tenant de plataforma no editable');
     const tenant = await this.prisma.tenant.findUnique({ where: { id } });
     if (!tenant) throw new NotFoundException('Tenant no encontrado');
     const data: Prisma.TenantUpdateInput = {};

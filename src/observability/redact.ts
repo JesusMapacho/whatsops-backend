@@ -11,6 +11,8 @@ const SENSITIVE_KEYS = [
   'authorization',
   'secret',
   'apikey',
+  // Con guion: el header de WAHA es `X-Api-Key`, que no contiene "apikey".
+  'api-key',
   'clientsecret',
   'webhooksecret',
   'card',

@@ -33,4 +33,14 @@ export class WebhookController {
   ) {
     return this.webhook.ingest(req.rawBody ?? Buffer.alloc(0), signature);
   }
+
+  // Ruta aparte para WAHA: otro envelope y otra firma (HMAC-SHA512 hex sin
+  // prefijo, contra la clave derivada de la sesión).
+  @Post('waha')
+  receiveWaha(
+    @Req() req: { rawBody?: Buffer },
+    @Headers('x-webhook-hmac') hmac?: string,
+  ) {
+    return this.webhook.ingestWaha(req.rawBody ?? Buffer.alloc(0), hmac);
+  }
 }

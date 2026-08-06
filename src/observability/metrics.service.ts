@@ -4,6 +4,8 @@ import { Queue } from 'bullmq';
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import { WEBHOOK_QUEUE } from '../webhook/webhook.service';
 import { BILLING_QUEUE } from '../billing/billing.service';
+import { WAHA_QUEUE } from '../waha/waha.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 // Instrumentación Prometheus. Etiquetas ACOTADAS (method/route/status/tenant);
 // nunca userId/teléfono/ID libres (cardinalidad). El detalle por usuario sale
@@ -15,10 +17,13 @@ export class MetricsService {
   readonly httpTotal: Counter<string>;
   readonly httpErrors: Counter<string>;
   private readonly queueJobs: Gauge<string>;
+  private readonly wahaSessions: Gauge<string>;
 
   constructor(
     @InjectQueue(WEBHOOK_QUEUE) private readonly webhookQueue: Queue,
     @InjectQueue(BILLING_QUEUE) private readonly billingQueue: Queue,
+    @InjectQueue(WAHA_QUEUE) private readonly wahaQueue: Queue,
+    private readonly prisma: PrismaService,
   ) {
     collectDefaultMetrics({ register: this.registry });
 
@@ -48,6 +53,16 @@ export class MetricsService {
       labelNames: ['queue', 'state'],
       registers: [this.registry],
     });
+
+    // Solo `status`: sin label de tenant, por la doctrina de cardinalidad de
+    // arriba. Es la señal de operación de la capa gratuita — si baja el número de
+    // WORKING, hay tenants que dejaron de recibir.
+    this.wahaSessions = new Gauge({
+      name: 'waha_sessions',
+      help: 'Sesiones WAHA por estado',
+      labelNames: ['status'],
+      registers: [this.registry],
+    });
   }
 
   observe(method: string, route: string, status: number, tenant: string, seconds: number) {
@@ -63,6 +78,7 @@ export class MetricsService {
     for (const [name, q] of [
       [WEBHOOK_QUEUE, this.webhookQueue],
       [BILLING_QUEUE, this.billingQueue],
+      [WAHA_QUEUE, this.wahaQueue],
     ] as const) {
       try {
         const counts = await q.getJobCounts('completed', 'failed', 'active', 'waiting', 'delayed');
@@ -73,6 +89,23 @@ export class MetricsService {
         // si Redis no responde, no rompemos el scrape del resto de métricas
       }
     }
+
+    // Sesiones WAHA por estado. El estado lo mantiene al día la reconciliación
+    // (waha.service), así que aquí basta con contar filas.
+    try {
+      const rows = await this.prisma.wabaConnection.groupBy({
+        by: ['status'],
+        where: { platform: 'waha' },
+        _count: { _all: true },
+      });
+      this.wahaSessions.reset(); // un estado que desaparece debe dejar de reportarse
+      for (const r of rows) {
+        this.wahaSessions.set({ status: r.status }, r._count._all);
+      }
+    } catch {
+      // si la DB no responde, no rompemos el scrape del resto de métricas
+    }
+
     return this.registry.metrics();
   }
 }

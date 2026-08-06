@@ -6,16 +6,43 @@ import { Platform } from '@prisma/client';
 import { SendDto, buildMessagePayload, mapGraphError } from './messaging.util';
 import { buildMediaPayload, MediaKind } from './media.util';
 
+// Opciones del media al construir el cuerpo. `mimeType` solo lo usa WAHA (manda el
+// binario inline y tiene que declarar el tipo); los adaptadores de Meta lo ignoran.
+export interface MediaOpts {
+  caption?: string;
+  filename?: string;
+  mimeType?: string;
+}
+
 export interface ChannelAdapter {
   // WhatsApp acepta plantillas; Messenger/IG no (usan message tags, fuera de alcance).
   supportsTemplate: boolean;
   // WA sube el binario a /media y referencia por id; Messenger/IG referencian por URL.
   needsMediaUpload: boolean;
+  // La ventana de servicio de 24 h es una regla de Meta: WAHA (WhatsApp Web) no la tiene.
+  enforcesWindow: boolean;
+  // WAHA manda el binario inline en base64 en vez de referenciarlo por URL.
+  mediaAsBase64?: boolean;
+  // El transporte no oficial arriesga el número del tenant: se le aplica ritmo y
+  // cupo (ver limits.ts). Los canales de Meta ya los limita Meta.
+  paced?: boolean;
   windowClosedMessage: string;
-  sendUrl(externalId: string, version: string): string;
-  buildText(to: string, dto: SendDto): object;
-  // ref = mediaId (WA) | URL pública del binario (Messenger/IG).
-  buildMedia(to: string, kind: MediaKind, ref: string, opts: { caption?: string; filename?: string }): object;
+  // baseUrl y kind solo los usa WAHA (rutas fijas por tipo); version solo Meta.
+  sendUrl(externalId: string, version: string, baseUrl?: string, kind?: MediaKind): string;
+  authHeaders(token: string): Record<string, string>;
+  // session solo lo usa WAHA: viaja en el cuerpo, no en la URL.
+  buildText(to: string, dto: SendDto, session?: string): object;
+  // ref = mediaId (WA) | URL pública del binario (Messenger/IG) | base64 (WAHA).
+  buildMedia(
+    to: string,
+    kind: MediaKind,
+    ref: string,
+    opts: MediaOpts,
+    session?: string,
+  ): object;
+  // Extrae el id del mensaje de la respuesta. Sin definir ⇒ la forma de Meta
+  // (`json.messages[0].id`), que resuelve MessagingService.
+  messageId?(json: any): string | null;
   mapError(json: any): string;
 }
 
@@ -23,11 +50,18 @@ function messagesUrl(externalId: string, version: string): string {
   return `https://graph.facebook.com/${version}/${encodeURIComponent(externalId)}/messages`;
 }
 
+const bearer = (token: string) => ({
+  Authorization: `Bearer ${token}`,
+  'Content-Type': 'application/json',
+});
+
 const whatsapp: ChannelAdapter = {
   supportsTemplate: true,
   needsMediaUpload: true,
+  enforcesWindow: true,
   windowClosedMessage: 'Ventana de 24 h cerrada: solo se permiten mensajes de plantilla.',
   sendUrl: messagesUrl,
+  authHeaders: bearer,
   buildText: (to, dto) => buildMessagePayload(to, dto),
   buildMedia: (to, kind, mediaId, opts) => buildMediaPayload(to, kind, mediaId, opts),
   mapError: mapGraphError,
@@ -47,9 +81,11 @@ const ATTACHMENT_TYPE: Record<MediaKind, string> = {
 const messaging: ChannelAdapter = {
   supportsTemplate: false,
   needsMediaUpload: false,
+  enforcesWindow: true,
   windowClosedMessage:
     'Ventana de 24 h cerrada: este canal no permite iniciar conversación fuera de la ventana.',
   sendUrl: messagesUrl,
+  authHeaders: bearer,
   buildText: (to, dto) => {
     if (dto.type !== 'text') throw new Error('Este canal no soporta plantillas');
     return { recipient: { id: to }, messaging_type: 'RESPONSE', message: { text: dto.text } };
@@ -61,10 +97,66 @@ const messaging: ChannelAdapter = {
   mapError: (json) => json?.error?.message ?? 'Meta rechazó el envío.',
 };
 
+// WAHA no tiene un endpoint único: hay una ruta fija por tipo de mensaje, y el
+// destinatario y la sesión viajan en el cuerpo.
+// ponytail: audio va por sendFile porque sendVoice exige ogg/opus y aquí llega
+// cualquier audio válido para Meta. Upgrade: rutear a /api/sendVoice cuando el
+// mime sea audio/ogg (habría que pasar el mime a sendUrl).
+const WAHA_PATH: Record<MediaKind | 'text', string> = {
+  text: 'sendText',
+  image: 'sendImage',
+  sticker: 'sendImage',
+  video: 'sendVideo',
+  audio: 'sendFile',
+  document: 'sendFile',
+};
+
+// WAHA (https://waha.devlike.pro): WhatsApp Web self-hosted. No es API de Meta,
+// así que no hay ventana de 24 h ni plantillas. Auth por X-Api-Key de instancia.
+const waha: ChannelAdapter = {
+  supportsTemplate: false,
+  needsMediaUpload: false,
+  enforcesWindow: false,
+  mediaAsBase64: true,
+  paced: true,
+  windowClosedMessage: '', // nunca se usa: enforcesWindow es false
+  // El primer argumento (id externo) se ignora: la sesión va en el cuerpo.
+  sendUrl: (_externalId, _version, baseUrl = '', kind) =>
+    `${baseUrl.replace(/\/$/, '')}/api/${WAHA_PATH[kind ?? 'text']}`,
+  authHeaders: (apiKey) => ({ 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }),
+  buildText: (chatId, dto, session) => {
+    if (dto.type !== 'text') throw new Error('WAHA no soporta plantillas de Meta');
+    return { session, chatId, text: dto.text };
+  },
+  buildMedia: (chatId, kind, dataB64, opts, session) => ({
+    session,
+    chatId,
+    file: {
+      mimetype: opts.mimeType ?? 'application/octet-stream',
+      data: dataB64,
+      filename: opts.filename ?? 'file',
+    },
+    // sticker y audio no llevan caption, igual que en Cloud API.
+    ...(opts.caption && kind !== 'sticker' && kind !== 'audio'
+      ? { caption: opts.caption }
+      : {}),
+  }),
+  // WAHA devuelve el mensaje en la raíz; `id` es string en unos engines y
+  // { _serialized } en otros. Sin esto `wamid` quedaría nulo y los acuses
+  // (message.ack) nunca encontrarían la fila que actualizar.
+  messageId: (json) =>
+    typeof json?.id === 'string' ? json.id : (json?.id?._serialized ?? null),
+  mapError: (json) => {
+    const m = json?.message;
+    return (Array.isArray(m) ? m.join('; ') : m) ?? 'WAHA rechazó el envío.';
+  },
+};
+
 const ADAPTERS: Record<Platform, ChannelAdapter> = {
   whatsapp,
   messenger: messaging,
   instagram: messaging,
+  waha,
 };
 
 export function channelAdapter(platform: Platform): ChannelAdapter {

@@ -39,4 +39,80 @@ assert.strictEqual((msn.buildMedia('P', 'document', 'u', {}) as any).message.att
 // mapError genérico en messaging.
 assert.strictEqual(msn.mapError({ error: { message: 'nope' } }), 'nope');
 
+// Los canales de Meta SÍ aplican la ventana de 24 h y usan la forma de Meta para
+// el id del mensaje (sin messageId propio). Regresión de la feature 26.
+assert.ok(wa.enforcesWindow && msn.enforcesWindow);
+assert.strictEqual(wa.messageId, undefined);
+assert.strictEqual(msn.messageId, undefined);
+assert.ok(!wa.mediaAsBase64 && !msn.mediaAsBase64);
+assert.strictEqual(wa.authHeaders('TOK').Authorization, 'Bearer TOK');
+
+// --- WAHA: rutas fijas por tipo, sesión en el cuerpo, sin ventana ni plantillas ---
+const waha = channelAdapter('waha');
+const B = 'http://localhost:3002';
+
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B), `${B}/api/sendText`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'image'), `${B}/api/sendImage`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'sticker'), `${B}/api/sendImage`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'video'), `${B}/api/sendVideo`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'audio'), `${B}/api/sendFile`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'document'), `${B}/api/sendFile`);
+// Barra final en la base no duplica la del path.
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', `${B}/`), `${B}/api/sendText`);
+
+assert.ok(!waha.supportsTemplate && !waha.needsMediaUpload);
+assert.ok(!waha.enforcesWindow, 'WAHA no es Meta: no hay ventana de 24 h');
+assert.ok(waha.mediaAsBase64);
+assert.deepStrictEqual(waha.authHeaders('KEY'), {
+  'X-Api-Key': 'KEY',
+  'Content-Type': 'application/json',
+});
+
+// Texto: la sesión viaja en el cuerpo, el destinatario es el chatId completo.
+assert.deepStrictEqual(waha.buildText('521555@c.us', { type: 'text', text: 'hola' }, 't_x'), {
+  session: 't_x',
+  chatId: '521555@c.us',
+  text: 'hola',
+});
+// Las plantillas son de Meta: lanza.
+assert.throws(() =>
+  waha.buildText('521555@c.us', { type: 'template', name: 'x', language: 'es' } as any, 't_x'),
+);
+
+// Media inline en base64 (no por URL: WAHA no alcanzaría nuestro localhost).
+const wahaMedia = waha.buildMedia(
+  '521555@c.us',
+  'image',
+  'QkFTRTY0',
+  { caption: 'mira', mimeType: 'image/jpeg', filename: 'x.jpg' },
+  't_x',
+) as any;
+assert.strictEqual(wahaMedia.session, 't_x');
+assert.strictEqual(wahaMedia.chatId, '521555@c.us');
+assert.strictEqual(wahaMedia.file.data, 'QkFTRTY0');
+assert.strictEqual(wahaMedia.file.mimetype, 'image/jpeg');
+assert.strictEqual(wahaMedia.file.filename, 'x.jpg');
+assert.strictEqual(wahaMedia.caption, 'mira');
+// sticker y audio no llevan caption, igual que en Cloud API.
+assert.strictEqual(
+  (waha.buildMedia('5@c.us', 'sticker', 'B64', { caption: 'x', mimeType: 'image/webp' }, 't') as any).caption,
+  undefined,
+);
+assert.strictEqual(
+  (waha.buildMedia('5@c.us', 'audio', 'B64', { caption: 'x', mimeType: 'audio/ogg' }, 't') as any).caption,
+  undefined,
+);
+
+// El id del mensaje: string en unos engines, { _serialized } en otros. Sin esto
+// `wamid` quedaría nulo y los acuses nunca cuadrarían.
+assert.strictEqual(waha.messageId!({ id: 'false_5@c.us_AAA' }), 'false_5@c.us_AAA');
+assert.strictEqual(waha.messageId!({ id: { _serialized: 'X' } }), 'X');
+assert.strictEqual(waha.messageId!({}), null);
+assert.strictEqual(waha.messageId!(null), null);
+
+// Errores de WAHA: `message` puede ser string o array de validación.
+assert.strictEqual(waha.mapError({ message: 'boom' }), 'boom');
+assert.strictEqual(waha.mapError({ message: ['a', 'b'] }), 'a; b');
+assert.strictEqual(waha.mapError({}), 'WAHA rechazó el envío.');
+
 console.log('channels.check OK');

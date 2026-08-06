@@ -37,6 +37,13 @@ export class PlatformController {
     return this.platform.updateTenant(id, body);
   }
 
+  // Operación de la capa gratuita: sesiones WAHA de todos los tenants con su
+  // estado y volumen del día. Sin secretos (ni api key ni baseUrl).
+  @Get('waha-sessions')
+  wahaSessions() {
+    return this.platform.wahaSessions();
+  }
+
   // Agregados de negocio de un tenant (cross-tenant, auditado por el guard).
   @Get('tenants/:id/metrics-negocio')
   tenantMetrics(@Param('id') id: string, @Query('from') from?: string, @Query('to') to?: string) {

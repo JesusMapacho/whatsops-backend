@@ -1,27 +1,43 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Platform } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
+import { wahaHmacKey, wahaSessionName } from '../webhook/waha';
+import {
+  createSession,
+  deleteSession,
+  fetchQr,
+  ping,
+  restartSession,
+} from '../waha/waha.client';
+import { assertSafeBaseUrl } from '../waha/waha.url';
+import { PLATFORM_TENANT_ID } from '../platform/platform.constants';
 
 // ponytail: versión de Graph fija con override por env. Subir cuando Meta deprecie.
 const GRAPH_VERSION = 'v22.0';
 
-const PLATFORMS: Platform[] = ['whatsapp', 'instagram', 'messenger'];
+const PLATFORMS: Platform[] = ['whatsapp', 'instagram', 'messenger', 'waha'];
 
 function parsePlatform(v: unknown): Platform {
   if (v === undefined || v === null || v === '') return 'whatsapp';
   if (typeof v === 'string' && (PLATFORMS as string[]).includes(v)) return v as Platform;
-  throw new BadRequestException('platform debe ser whatsapp, instagram o messenger');
+  throw new BadRequestException('platform debe ser whatsapp, instagram, messenger o waha');
 }
 
 @Injectable()
 export class WabaService {
+  private readonly logger = new Logger(WabaService.name);
   private readonly graphVersion: string;
+  private readonly wahaUrl: string;
+  private readonly wahaKey: string;
+  private readonly wahaSecret: string;
+  private readonly wahaCallbackUrl: string;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -29,10 +45,17 @@ export class WabaService {
     config: ConfigService,
   ) {
     this.graphVersion = config.get<string>('GRAPH_API_VERSION') ?? GRAPH_VERSION;
+    this.wahaUrl = config.get<string>('WAHA_URL') ?? '';
+    this.wahaKey = config.get<string>('WAHA_API_KEY') ?? '';
+    this.wahaSecret = config.get<string>('WAHA_WEBHOOK_SECRET') ?? '';
+    this.wahaCallbackUrl = config.get<string>('WAHA_CALLBACK_URL') ?? '';
   }
 
   async create(tenantId: string, body: any) {
     const platform = parsePlatform(body?.platform);
+    // WAHA sale antes: no lleva token de Meta ni id de canal del cliente, y
+    // validateToken mandaría su api key a graph.facebook.com.
+    if (platform === 'waha') return this.createWaha(tenantId, body);
     const accessToken = str(body?.accessToken, 'accessToken');
     // Id externo del canal: phone_number_id (WA) / page id (Messenger) / IG id.
     const phoneNumberId = str(body?.phoneNumberId, 'phoneNumberId');
@@ -67,6 +90,75 @@ export class WabaService {
     }
   }
 
+  // Conecta un WhatsApp por QR contra una instancia WAHA. El nombre de sesión se
+  // DERIVA del tenant: nunca llega del body (ver wahaSessionName — la api key de
+  // WAHA es de instancia, así que el nombre de sesión es la frontera de tenant).
+  private async createWaha(tenantId: string, body: any) {
+    // El super-admin no debe tener canales propios: su tenant está excluido de la
+    // consola de operación, así que una sesión creada aquí queda doblemente
+    // invisible (pasó en las pruebas de la feature 26).
+    this.assertNotPlatform(tenantId);
+    // BYO: el tenant trae su propia instancia. Si no, la gestionada de env.
+    const byo = typeof body?.baseUrl === 'string' && body.baseUrl.trim();
+    const baseUrl = byo
+      ? await this.safeBaseUrl(body.baseUrl.trim())
+      : this.wahaUrl.replace(/\/$/, '');
+    const apiKey = byo ? str(body?.apiKey, 'apiKey') : this.wahaKey;
+
+    if (!baseUrl || !apiKey) {
+      throw new BadRequestException(
+        'WAHA no está configurado en este servidor. Indica la URL y la api key de tu propia instancia.',
+      );
+    }
+    if (!this.wahaCallbackUrl || !this.wahaSecret) {
+      throw new BadRequestException(
+        'Falta WAHA_CALLBACK_URL o WAHA_WEBHOOK_SECRET en el servidor.',
+      );
+    }
+
+    await ping(baseUrl, apiKey).catch((e: Error) => {
+      throw new BadRequestException(e.message);
+    });
+
+    const session = wahaSessionName(tenantId);
+    let conn;
+    try {
+      conn = await this.prisma.wabaConnection.create({
+        data: {
+          tenantId,
+          platform: 'waha',
+          wabaId: null,
+          businessId: null,
+          phoneNumberId: session,
+          accessTokenEnc: this.crypto.encrypt(apiKey),
+          baseUrl: byo ? baseUrl : null,
+          source: 'waha_qr',
+          status: 'STARTING',
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') {
+        throw new BadRequestException('Ya tienes una conexión de WhatsApp por QR.');
+      }
+      throw e;
+    }
+
+    try {
+      await createSession(
+        baseUrl,
+        apiKey,
+        session,
+        this.wahaCallbackUrl,
+        wahaHmacKey(this.wahaSecret, session),
+      );
+    } catch (e) {
+      // Sin sesión no hay conexión: no dejar la fila huérfana.
+      await this.prisma.wabaConnection.delete({ where: { id: conn.id } });
+      throw new BadRequestException((e as Error).message);
+    }
+    return this.toPublic(conn);
+  }
+
   async list(tenantId: string) {
     const conns = await this.prisma.wabaConnection.findMany({
       where: { tenantId },
@@ -76,12 +168,85 @@ export class WabaService {
   }
 
   async remove(tenantId: string, id: string) {
+    const conn = await this.prisma.wabaConnection.findFirst({ where: { id, tenantId } });
+    if (!conn) throw new NotFoundException('Conexión no encontrada');
+    // Borrar solo la fila dejaría la sesión viva y emparejada, mandando webhooks
+    // que ya no resuelven a ninguna conexión: cada evento acabaría en `failed`.
+    if (conn.platform === 'waha') {
+      await deleteSession(
+        this.baseUrlOf(conn),
+        this.crypto.decrypt(conn.accessTokenEnc),
+        conn.phoneNumberId,
+      ).catch((e: Error) => this.logger.warn(`No se pudo borrar la sesión WAHA: ${e.message}`));
+    }
     // deleteMany con tenantId: no se puede borrar la conexión de otro tenant.
     const { count } = await this.prisma.wabaConnection.deleteMany({
       where: { id, tenantId },
     });
     if (!count) throw new NotFoundException('Conexión no encontrada');
     return { deleted: true };
+  }
+
+  // QR de emparejamiento. El `tenantId` de este where ES la frontera de
+  // aislamiento: un QR de WhatsApp es una credencial, y sin él cualquier admin
+  // podría emparejar su teléfono a la sesión de otro tenant y leer/enviar como
+  // ellos. La api key se queda en el servidor: nunca llega al navegador.
+  async qr(tenantId: string, id: string) {
+    const conn = await this.wahaConn(tenantId, id);
+    try {
+      return await fetchQr(
+        this.baseUrlOf(conn),
+        this.crypto.decrypt(conn.accessTokenEnc),
+        conn.phoneNumberId,
+      );
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  async restart(tenantId: string, id: string) {
+    const conn = await this.wahaConn(tenantId, id);
+    try {
+      await restartSession(
+        this.baseUrlOf(conn),
+        this.crypto.decrypt(conn.accessTokenEnc),
+        conn.phoneNumberId,
+      );
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+    return { restarted: true };
+  }
+
+  // Se comprueba también aquí y no solo al crear: una fila puede ser anterior a la
+  // guarda, y el QR es equivalente a una credencial.
+  private async wahaConn(tenantId: string, id: string) {
+    this.assertNotPlatform(tenantId);
+    const conn = await this.prisma.wabaConnection.findFirst({
+      where: { id, tenantId, platform: 'waha' },
+    });
+    if (!conn) throw new NotFoundException('Conexión no encontrada');
+    return conn;
+  }
+
+  private assertNotPlatform(tenantId: string) {
+    if (tenantId === PLATFORM_TENANT_ID) {
+      throw new BadRequestException(
+        'El super-admin de plataforma no puede conectar canales. Usa el tenant de un cliente.',
+      );
+    }
+  }
+
+  private baseUrlOf(conn: { baseUrl: string | null }): string {
+    return conn.baseUrl ?? this.wahaUrl.replace(/\/$/, '');
+  }
+
+  private async safeBaseUrl(raw: string): Promise<string> {
+    try {
+      return await assertSafeBaseUrl(raw);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
   }
 
   // Llamada barata a la Graph API: si el token sirve, devuelve 200 con los campos.
