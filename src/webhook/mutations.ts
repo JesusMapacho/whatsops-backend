@@ -6,6 +6,12 @@
 // ordena por ello, y payload ya es la fuente del render y ya viaja por el socket.
 export type Reactions = Record<string, string[]>;
 
+// Autor de NUESTRAS reacciones. No es un waId, así que no puede chocar con el de un
+// contacto — y es el mismo valor tanto si la reacción se hizo desde la bandeja
+// (escritura optimista) como si llega por webhook con fromMe. Si fueran distintos,
+// la misma reacción aparecería dos veces.
+export const REACTION_ME = 'me';
+
 // Aplica una reacción. WhatsApp permite UNA reacción por persona y mensaje, así
 // que poner otra reemplaza la anterior; `emoji` vacío la quita.
 //

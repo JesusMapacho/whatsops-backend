@@ -18,6 +18,31 @@ export class ConversationsService {
     private readonly messaging: MessagingService,
   ) {}
 
+  // Marca la conversación como leída y avisa al cliente (palomitas azules).
+  //
+  // Se llama al abrir el hilo, al responder y al llegar un mensaje con el hilo
+  // abierto. Antes solo pasaba al abrir, así que con la conversación abierta los
+  // no-leídos se seguían acumulando y el cliente nunca veía las palomitas.
+  //
+  // Emite `conversation:updated` para que la lista de otras pestañas/agentes
+  // refresque su contador en vez de esperar a un refetch.
+  async markRead(tenantId: string, id: string) {
+    const { count } = await this.prisma.conversation.updateMany({
+      where: { id, tenantId },
+      data: { lastReadAt: new Date() },
+    });
+    if (!count) return { read: false };
+
+    // Mejor esfuerzo, con catch OBLIGATORIO: una promesa rechazada sin manejar
+    // tumba el proceso de Node, y el fetch a un WAHA caído rechaza.
+    this.messaging
+      .markSeen(tenantId, id)
+      .catch((e: Error) => this.logger.warn(`No se pudo marcar como leído: ${e.message}`));
+
+    this.events.emitToTenant(tenantId, 'conversation:updated', { id, unread: 0 });
+    return { read: true };
+  }
+
   async list(
     tenantId: string,
     filter: string | undefined,
@@ -74,21 +99,9 @@ export class ConversationsService {
       ...(before ? { cursor: { id: before }, skip: 1 } : {}),
     });
 
-    // Abrir la conversación = marcarla leída.
-    await this.prisma.conversation.update({
-      where: { id },
-      data: { lastReadAt: new Date() },
-    });
-
-    // Y avisarle al cliente (palomitas azules). Solo en la PRIMERA página: este
-    // mismo método pagina hacia atrás con `before`, y ahí re-avisar no tiene
-    // sentido. Mejor esfuerzo y con catch obligatorio: una promesa rechazada sin
-    // manejar tumba el proceso de Node, y el fetch a un WAHA caído rechaza.
-    if (!before) {
-      this.messaging
-        .markSeen(tenantId, id)
-        .catch((e: Error) => this.logger.warn(`No se pudo marcar como leído: ${e.message}`));
-    }
+    // Abrir la conversación = marcarla leída. Solo en la PRIMERA página: este mismo
+    // método pagina hacia atrás con `before`, y ahí no aplica.
+    if (!before) await this.markRead(tenantId, id);
 
     // Adjunta una mediaUrl firmada y temporal a los mensajes con adjunto.
     return page.reverse().map((m) => withMediaUrl(m, (k) => this.storage.signedUrl(k)));

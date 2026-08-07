@@ -117,8 +117,29 @@ assert.strictEqual(
 // `wamid` quedaría nulo y los acuses nunca cuadrarían.
 assert.strictEqual(waha.messageId!({ id: 'false_5@c.us_AAA' }), 'false_5@c.us_AAA');
 assert.strictEqual(waha.messageId!({ id: { _serialized: 'X' } }), 'X');
+assert.strictEqual(waha.messageId!({ _data: { id: { _serialized: 'Y' } } }), 'Y');
 assert.strictEqual(waha.messageId!({}), null);
 assert.strictEqual(waha.messageId!(null), null);
+
+// NOWEB/GOWS devuelven la forma de Baileys: hay que RE-SERIALIZAR la clave para que
+// el id case con el del evento message.any. Sin esto el wamid quedaba nulo y CADA
+// mensaje enviado aparecía dos veces en el hilo (bug observado en uso real).
+assert.strictEqual(
+  waha.messageId!({ key: { fromMe: true, remoteJid: '240183328899228@lid', id: '3EB0294C08' } }),
+  'true_240183328899228@lid_3EB0294C08',
+);
+assert.strictEqual(
+  waha.messageId!({ _data: { key: { fromMe: false, remoteJid: '5215@c.us', id: 'AC45' } } }),
+  'false_5215@c.us_AC45',
+);
+// Una clave incompleta no produce un id inventado.
+assert.strictEqual(waha.messageId!({ key: { id: 'solo-id' } }), null);
+assert.strictEqual(waha.messageId!({ key: { remoteJid: '5@c.us' } }), null);
+// Y el formato debe coincidir EXACTAMENTE con el que emite el decoder para un eco.
+assert.strictEqual(
+  waha.messageId!({ key: { fromMe: true, remoteJid: '5@c.us', id: 'Z' } }),
+  'true_5@c.us_Z',
+);
 
 // Errores de WAHA: `message` puede ser string o array de validación.
 assert.strictEqual(waha.mapError({ message: 'boom' }), 'boom');

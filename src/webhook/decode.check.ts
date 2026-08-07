@@ -295,6 +295,21 @@ assert.deepStrictEqual(react[0].messages, []);
 assert.deepStrictEqual(react[0].mutations, [
   { kind: 'reaction', wamid: 'false_521555@c.us_AAA', author: '521555@c.us', emoji: '🙏' },
 ]);
+// NUESTRA propia reacción se normaliza a 'me', el mismo autor que usa la escritura
+// optimista al reaccionar desde la bandeja. Si no, la misma reacción se contaba dos
+// veces: una como 'me' y otra con el jid (bug observado en uso real).
+assert.deepStrictEqual(
+  decodeWebhook(
+    wahaEnvelope('message.reaction', {
+      fromMe: true,
+      from: '5218716458297@c.us',
+      reaction: { text: '😂', messageId: 'm1' },
+      _data: { key: { remoteJid: '5218716458297@c.us' } },
+    }),
+  )[0].mutations,
+  [{ kind: 'reaction', wamid: 'm1', author: 'me', emoji: '😂' }],
+);
+
 // Texto vacío = quitó la reacción (no es "sin reacción").
 assert.deepStrictEqual(
   decodeWebhook(

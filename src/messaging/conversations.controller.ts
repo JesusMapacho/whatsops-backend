@@ -55,6 +55,14 @@ export class ConversationsController {
     return this.messaging.send(user.tenantId, id, body);
   }
 
+  // Marcar leída explícitamente: el frontend la llama al llegar un mensaje con el
+  // hilo abierto y después de responder, no solo al abrir.
+  @Post(':id/read')
+  async read(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.conversations.markRead(user.tenantId, id);
+  }
+
   // Indicador "escribiendo…" hacia el cliente. El cooldown lo aplica el servicio:
   // el debounce del navegador no es un control.
   @Post(':id/typing')
@@ -85,9 +93,10 @@ export class ConversationsController {
     @UploadedFile() file: UploadedMediaFile,
     @Body('caption') caption?: string,
     @Body('replyTo') replyTo?: string,
+    @Body('durationSec') durationSec?: string,
   ) {
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
-    return this.messaging.sendMedia(user.tenantId, id, file, caption, replyTo);
+    return this.messaging.sendMedia(user.tenantId, id, file, caption, replyTo, Number(durationSec));
   }
 
   @Post(':id/assign')

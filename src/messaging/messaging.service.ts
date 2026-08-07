@@ -26,7 +26,7 @@ import { channelAdapter, ChannelAdapter } from './channels';
 import { checkLimits, DAY_MS, HOUR_MS, LimitConfig, limitsFromEnv } from './limits';
 import { StorageService } from '../storage/storage.service';
 import { sendReaction, sendSeen, setTyping } from '../waha/waha.client';
-import { applyReaction } from '../webhook/mutations';
+import { applyReaction, REACTION_ME } from '../webhook/mutations';
 
 // Archivo subido (forma mínima de multer; evita depender de @types/multer).
 export interface UploadedMediaFile {
@@ -42,9 +42,6 @@ const GRAPH_VERSION = 'v22.0';
 // Mínimo entre dos "escribiendo…" de la misma conversación.
 const TYPING_COOLDOWN_MS = 3000;
 
-// Autor de NUESTRAS reacciones en payload.reactions. No es un waId, así que no
-// puede chocar con el de un contacto.
-const ME = 'me';
 
 @Injectable()
 export class MessagingService {
@@ -231,7 +228,7 @@ export class MessagingService {
       // El autor somos nosotros: se identifica con la sesión, que es estable y no
       // choca con los waId de los contactos.
       data: {
-        payload: { ...payload, reactions: applyReaction(payload.reactions, ME, emoji) },
+        payload: { ...payload, reactions: applyReaction(payload.reactions, REACTION_ME, emoji) },
       },
     });
     const withUrl = withMediaUrl(updated, (k) => this.storage.signedUrl(k));
@@ -292,8 +289,19 @@ export class MessagingService {
   // Id del mensaje según el proveedor: WAHA lo devuelve en la raíz, Meta en
   // `messages[0].id`. Sin esto los acuses de WAHA no encontrarían la fila.
   private messageIdOf(adapter: ChannelAdapter, json: any): string | null {
-    if (adapter.messageId) return adapter.messageId(json);
-    return json?.messages?.[0]?.id ?? null;
+    if (!adapter.messageId) return json?.messages?.[0]?.id ?? null;
+    const id = adapter.messageId(json);
+    if (!id) {
+      // Sin id no se puede deduplicar el eco ni casar los acuses. Se registran las
+      // CLAVES de la respuesta (no el contenido) para poder añadir la forma que
+      // falte sin tener que adivinar.
+      this.logger.warn(
+        `El proveedor no devolvió id de mensaje. Claves de la respuesta: ${Object.keys(
+          json ?? {},
+        ).join(', ')}`,
+      );
+    }
+    return id;
   }
 
   // Envía un adjunto (imagen/documento/audio/video/sticker). El media de sesión
@@ -304,6 +312,7 @@ export class MessagingService {
     file: UploadedMediaFile,
     caption?: string,
     replyTo?: string,
+    durationSec?: number,
   ) {
     if (!file?.buffer?.length) throw new BadRequestException('Archivo requerido');
 
@@ -341,6 +350,11 @@ export class MessagingService {
       ...(filename ? { filename } : {}),
       ...(caption ? { caption } : {}),
       ...(voice ? { voice: true } : {}),
+      // El webm del navegador no lleva cabecera de duración, así que el <audio> no
+      // la puede mostrar: la mide el cliente al grabar y se guarda aquí.
+      ...(voice && durationSec && Number.isFinite(durationSec)
+        ? { durationSec: Math.round(durationSec) }
+        : {}),
       ...(replyTo ? { replyToWamid: replyTo } : {}),
     };
 

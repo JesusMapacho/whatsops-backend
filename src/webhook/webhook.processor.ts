@@ -14,6 +14,8 @@ import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
 const ALLOWED_STATUS = new Set<string>(['sent', 'delivered', 'read', 'failed']);
+// Ventana en la que un eco puede adoptar la fila de nuestro propio envío.
+const CLAIM_WINDOW_MS = 2 * 60 * 1000;
 const GRAPH_VERSION = 'v22.0';
 
 // Worker de la cola webhook-events. Reintentos/backoff los configura el módulo.
@@ -137,6 +139,18 @@ export class WebhookProcessor extends WorkerHost {
           },
         });
 
+    // Red de seguridad de la duplicación: si el envío por la app no consiguió el
+    // wamid de la respuesta del proveedor, su fila quedó con wamid null y el eco no
+    // tiene con qué deduplicarse. En ese caso el eco ADOPTA la fila pendiente en
+    // vez de crear una segunda.
+    // ponytail: casa por (conversación, tipo, texto, últimos 2 min). Techo: dos
+    // mensajes idénticos enviados en ese hueco se colapsan en uno — mucho menos
+    // malo que duplicar todos. Deja de hacer falta en cuanto messageId acierta.
+    if (direction === 'out') {
+      const claimed = await this.claimPendingOutbound(tenantId, conversation.id, msg);
+      if (claimed) return;
+    }
+
     // Media entrante: descargar de Meta y guardar en storage; el payload se normaliza.
     const payload = MEDIA_TYPES.has(msg.type)
       ? await this.ingestMedia(conn, msg)
@@ -247,6 +261,48 @@ export class WebhookProcessor extends WorkerHost {
       this.logger.warn(`No se pudo descargar adjunto ${conn.platform}: ${(err as Error).message}`);
       return { kind, error: true };
     }
+  }
+
+  // Busca la fila que dejó nuestro propio envío sin wamid y le pone el del eco.
+  // Devuelve true si la adoptó (y por tanto no hay que crear nada).
+  private async claimPendingOutbound(
+    tenantId: string,
+    conversationId: string,
+    msg: InboundMessage,
+  ): Promise<boolean> {
+    const body = (msg.payload as any)?.text?.body ?? '';
+    const pending = await this.prisma.message.findFirst({
+      where: {
+        tenantId,
+        conversationId,
+        direction: 'out',
+        wamid: null,
+        type: msg.type,
+        createdAt: { gt: new Date(Date.now() - CLAIM_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!pending) return false;
+    // Para texto se exige que coincida el cuerpo; para media basta el tipo (el
+    // binario ya lo guardamos nosotros y el eco no lo trae igual).
+    if (msg.type === 'text' && ((pending.payload as any)?.text?.body ?? '') !== body) {
+      return false;
+    }
+
+    const updated = await this.prisma.message.update({
+      where: { id: pending.id },
+      // NO se marca viaDevice: este mensaje SÍ salió de la bandeja.
+      data: { wamid: msg.wamid, status: msg.status ?? pending.status },
+    });
+    this.logger.warn(
+      `Eco adoptado por una fila sin wamid (${msg.wamid}). Revisa messageId del adaptador.`,
+    );
+    this.events.emitToTenant(
+      tenantId,
+      'message:updated',
+      withMediaUrl(updated, (k) => this.storage.signedUrl(k)),
+    );
+    return true;
   }
 
   // Reacción o borrado sobre un mensaje ya persistido.

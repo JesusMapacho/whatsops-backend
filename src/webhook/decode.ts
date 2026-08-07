@@ -5,6 +5,7 @@
 import { MessageStatus } from '@prisma/client';
 import { kindForMime } from '../messaging/media.util';
 import { ACK_STATUS } from './waha';
+import { REACTION_ME } from './mutations';
 
 export type Platform = 'whatsapp' | 'instagram' | 'messenger' | 'waha';
 
@@ -239,7 +240,13 @@ function decodeWaha(p: any): NormalizedChange[] {
     // El cliente reaccionó a un mensaje. `reaction.text` vacío = quitó la reacción.
     case 'message.reaction': {
       const target = payload.reaction?.messageId;
-      const author = payload._data?.key?.remoteJid || payload.from || '';
+      // Si la reacción es NUESTRA, el autor se normaliza a REACTION_ME, el mismo
+      // que usa la escritura optimista al reaccionar desde la bandeja. Sin esto la
+      // misma reacción se contaba dos veces: una como 'me' y otra con el jid
+      // (bug observado en uso real).
+      const author = payload.fromMe
+        ? REACTION_ME
+        : payload._data?.key?.remoteJid || payload.from || '';
       if (typeof target !== 'string' || !target || !author) {
         return [{ ...base, messages: [], statuses: [] }];
       }

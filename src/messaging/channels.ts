@@ -130,6 +130,23 @@ const WAHA_PATH: Record<MediaKind | 'text', string> = {
   document: 'sendFile',
 };
 
+// Extrae el id de un mensaje de la respuesta de envío de WAHA, probando las formas
+// conocidas. Devuelve null si ninguna encaja (quien llama lo registra).
+export function wahaMessageId(json: any): string | null {
+  // 1) Ya serializado como string: 'true_5215555@c.us_3EB0…'
+  if (typeof json?.id === 'string' && json.id) return json.id;
+  // 2) WEBJS/WPP: { id: { _serialized } }
+  if (typeof json?.id?._serialized === 'string') return json.id._serialized;
+  if (typeof json?._data?.id?._serialized === 'string') return json._data.id._serialized;
+  // 3) NOWEB/GOWS (Baileys): { key: { remoteJid, fromMe, id } } → hay que
+  //    re-serializarlo igual que lo hace el evento, o los ids no casan.
+  const key = json?.key ?? json?._data?.key;
+  if (key && typeof key.id === 'string' && typeof key.remoteJid === 'string') {
+    return `${key.fromMe ? 'true' : 'false'}_${key.remoteJid}_${key.id}`;
+  }
+  return null;
+}
+
 // Ruta de envío de WAHA. El audio se bifurca por MIME: enviarlo todo por sendFile
 // hacía que una nota de voz llegara al teléfono como archivo adjunto en vez de
 // burbuja reproducible.
@@ -182,11 +199,14 @@ const waha: ChannelAdapter = {
       : {}),
     ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
   }),
-  // WAHA devuelve el mensaje en la raíz; `id` es string en unos engines y
-  // { _serialized } en otros. Sin esto `wamid` quedaría nulo y los acuses
-  // (message.ack) nunca encontrarían la fila que actualizar.
-  messageId: (json) =>
-    typeof json?.id === 'string' ? json.id : (json?.id?._serialized ?? null),
+  // Id del mensaje enviado. La forma varía por engine y NO está documentada, así
+  // que se cubren todas las plausibles.
+  //
+  // Es crítico: con `wamid` nulo, el eco de `message.any` no puede deduplicarse y
+  // CADA mensaje enviado aparecía dos veces en el hilo (bug observado en uso real).
+  // El engine NOWEB devuelve la forma de Baileys (`key.id`), que hay que
+  // re-serializar como `${fromMe}_${remoteJid}_${id}` para que case con el id del eco.
+  messageId: wahaMessageId,
   mapError: (json) => {
     const m = json?.message;
     return (Array.isArray(m) ? m.join('; ') : m) ?? 'WAHA rechazó el envío.';
