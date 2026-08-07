@@ -1,9 +1,19 @@
 // Check de los guardarraíles de la capa gratuita.
 // Correr: npx ts-node src/messaging/limits.check.ts
 import * as assert from 'node:assert';
-import { checkLimits, DEFAULT_LIMITS, limitsFromEnv } from './limits';
+import { checkLimits, DEFAULT_LIMITS, isCold, limitsFromEnv } from './limits';
 
-const cfg = { maxPerContactHour: 4, maxPerDay: 200 };
+const cfg = {
+  maxPerContactHour: 4,
+  maxPerDay: 200,
+  maxColdPerHour: 5,
+  maxColdPerDay: 20,
+  maxColdPerHourPaid: 30,
+  maxColdPerDayPaid: 200,
+};
+
+// Conteos en frío a cero, para los casos que sí los necesitan.
+const cero = { coldConversationOut: 0, coldTenantHour: 0, coldTenantDay: 0 };
 
 // --- Dentro de límites: pasa ---
 assert.ok(checkLimits({ contactLastHour: 0, tenantLastDay: 0 }, cfg, 'free').allowed);
@@ -33,7 +43,7 @@ assert.ok(checkLimits({ contactLastHour: 99, tenantLastDay: 9999 }, cfg, 'starte
 // --- Config desde env: valores válidos mandan, ausentes/basura caen al default ---
 assert.deepStrictEqual(
   limitsFromEnv((k) => ({ WAHA_MAX_PER_CONTACT_HOUR: '2', WAHA_MAX_PER_DAY: '50' })[k]),
-  { maxPerContactHour: 2, maxPerDay: 50 },
+  { ...DEFAULT_LIMITS, maxPerContactHour: 2, maxPerDay: 50 },
 );
 assert.deepStrictEqual(limitsFromEnv(() => undefined), DEFAULT_LIMITS);
 assert.deepStrictEqual(limitsFromEnv(() => 'no-es-un-numero'), DEFAULT_LIMITS);
@@ -67,5 +77,71 @@ assert.ok(
 );
 // Y un 1-a-1 no cambia de comportamiento por el parámetro nuevo.
 assert.ok(!checkLimits({ contactLastHour: 4, tenantLastDay: 0 }, cfg, 'free', {}).allowed);
+
+// --- Primer contacto (frío) ---
+const cold = { isGroup: false, cold: true };
+const base = { contactLastHour: 0, tenantLastDay: 0, ...cero };
+
+// isCold es "nunca nos escribió", NO "fuera de la ventana de 24 h": quien escribió
+// hace tres días ya nos conoce y no nos marca como spam por retomar.
+assert.strictEqual(isCold(null), true);
+assert.strictEqual(isCold(new Date('2020-01-01')), false);
+
+// Un primer contacto pasa.
+assert.ok(checkLimits(base, cfg, 'free', cold).allowed);
+
+// Un SEGUNDO mensaje al mismo desconocido, no. Sin ventana de tiempo: es la regla que
+// de verdad evita juntar las 5-10 marcas de spam que banean un número.
+const insiste = checkLimits({ ...base, coldConversationOut: 1 }, cfg, 'free', cold);
+assert.ok(!insiste.allowed);
+assert.ok(!insiste.allowed && /no ha contestado/.test(insiste.message));
+
+// Topes de conversaciones nuevas por hora y por día (gratis).
+assert.ok(!checkLimits({ ...base, coldTenantHour: 5 }, cfg, 'free', cold).allowed);
+assert.ok(!checkLimits({ ...base, coldTenantDay: 20 }, cfg, 'free', cold).allowed);
+assert.ok(checkLimits({ ...base, coldTenantHour: 4, coldTenantDay: 19 }, cfg, 'free', cold).allowed);
+
+// ANTI-REGRESIÓN CENTRAL: pagar NO exime del tope en frío, solo lo ensancha. En
+// caliente el plan pagado sí queda exento (comportamiento de siempre, arriba).
+assert.ok(
+  !checkLimits({ ...base, coldTenantDay: 200 }, cfg, 'pro', cold).allowed,
+  'un plan pagado NO puede molestar a desconocidos sin límite',
+);
+assert.ok(!checkLimits({ ...base, coldTenantHour: 30 }, cfg, 'pro', cold).allowed);
+// Pero por debajo del tope de pago sí puede, donde el gratuito ya estaría cortado.
+assert.ok(checkLimits({ ...base, coldTenantHour: 10, coldTenantDay: 100 }, cfg, 'pro', cold).allowed);
+assert.ok(!checkLimits({ ...base, coldTenantHour: 10 }, cfg, 'free', cold).allowed);
+
+// Un grupo no se inicia en frío.
+const grupoFrio = checkLimits(base, cfg, 'free', { isGroup: true, cold: true });
+assert.ok(!grupoFrio.allowed && /grupo/.test(grupoFrio.message));
+
+// El ritmo en caliente NO aplica a un primer contacto: por definición no hay historial.
+assert.ok(checkLimits({ ...base, contactLastHour: 99 }, cfg, 'free', cold).allowed);
+
+// Precedencia: gana el mensaje más específico y accionable.
+const todos = checkLimits(
+  { ...base, coldConversationOut: 1, coldTenantHour: 99, coldTenantDay: 99 },
+  cfg, 'free', cold,
+);
+assert.ok(!todos.allowed && /no ha contestado/.test(todos.message));
+
+// Faltar los conteos en frío es un error de programación, no un "permitido".
+assert.throws(
+  () => checkLimits({ contactLastHour: 0, tenantLastDay: 0 }, cfg, 'free', cold),
+  /conteos en frío/,
+);
+
+// Los cuatro env nuevos, y que un '0' siga cayendo al default.
+assert.deepStrictEqual(
+  limitsFromEnv((k) => ({
+    COLD_MAX_PER_HOUR: '2',
+    COLD_MAX_PER_DAY: '7',
+    COLD_MAX_PER_HOUR_PAID: '50',
+    COLD_MAX_PER_DAY_PAID: '500',
+  })[k]),
+  { ...DEFAULT_LIMITS, maxColdPerHour: 2, maxColdPerDay: 7, maxColdPerHourPaid: 50, maxColdPerDayPaid: 500 },
+);
+assert.strictEqual(limitsFromEnv(() => '0').maxColdPerDay, DEFAULT_LIMITS.maxColdPerDay);
 
 console.log('limits.check OK');

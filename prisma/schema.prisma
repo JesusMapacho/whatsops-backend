@@ -298,6 +298,11 @@ model Conversation {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  // Conteo de conversaciones en frío (lastInboundAt null) para el tope de primer
+  // contacto, y ritmo por contacto (que antes se contaba por conversación, con lo
+  // que cerrar el hilo reseteaba el tope anti-baneo).
+  @@index([tenantId, lastInboundAt])
+  @@index([tenantId, contactId])
 }
 
 model Message {

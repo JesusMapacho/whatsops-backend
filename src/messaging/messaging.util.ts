@@ -77,6 +77,15 @@ export function mapGraphError(json: any): string {
       return 'El destinatario no tiene WhatsApp o no puede recibir el mensaje.';
     case 131047:
       return 'Ventana de 24 h cerrada: este mensaje requiere una plantilla.';
+    // Los tres que solo salen al escribir en frío. 131048 es el que NO se puede
+    // ignorar: Meta está diciendo que nos está marcando como spam, y seguir
+    // enviando después de eso es autolesión — aborta el envío masivo.
+    case 131048:
+      return 'Meta bloqueó el envío por límite de spam. Detén el envío y revisa a quién le escribes.';
+    case 131049:
+      return 'Meta decidió no entregar este mensaje de marketing para cuidar la experiencia del usuario.';
+    case 130472:
+      return 'Este usuario está en un experimento de Meta y no recibe mensajes de marketing.';
     case 100:
       return err.message ?? 'Parámetro inválido en la solicitud.';
     default:

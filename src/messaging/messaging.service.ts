@@ -23,7 +23,7 @@ import {
   withMediaUrl,
 } from './media.util';
 import { channelAdapter, ChannelAdapter } from './channels';
-import { checkLimits, DAY_MS, HOUR_MS, LimitConfig, limitsFromEnv } from './limits';
+import { checkLimits, DAY_MS, HOUR_MS, isCold, LimitConfig, limitsFromEnv } from './limits';
 import { StorageService } from '../storage/storage.service';
 import { fetchChatPictureUrl, sendReaction, sendSeen, setTyping } from '../waha/waha.client';
 import { fetchPayloadBinary } from '../waha/waha.url';
@@ -87,7 +87,7 @@ export class MessagingService {
     if (dto.type === 'text' && adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
     }
-    await this.assertWithinLimits(adapter, tenantId, conversationId, conv.contact.isGroup);
+    await this.assertWithinLimits(adapter, tenantId, conv, conv.contact.isGroup);
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
     const session = conv.wabaConnection.phoneNumberId;
@@ -282,41 +282,79 @@ export class MessagingService {
   private async assertWithinLimits(
     adapter: ChannelAdapter,
     tenantId: string,
-    conversationId: string,
+    conv: { id: string; contactId: string; lastInboundAt: Date | null },
     isGroup = false,
   ) {
-    if (!adapter.paced) return;
+    const cold = isCold(conv.lastInboundAt);
+    // El ritmo *en caliente* sigue siendo solo de WAHA (en los canales de Meta ya
+    // limita Meta). El cupo en FRÍO aplica a los dos transportes.
+    if (!adapter.paced && !cold) return;
     try {
       const now = Date.now();
-      const [contactLastHour, tenantLastDay, tenant] = await Promise.all([
-        this.prisma.message.count({
-          where: {
-            tenantId,
-            conversationId,
-            direction: 'out',
-            createdAt: { gt: new Date(now - HOUR_MS) },
-            // El eco de lo que el dueño manda desde su teléfono NO cuenta para el
-            // ritmo por contacto: si contara, cuatro respuestas rápidas desde el
-            // celular bloquearían al agente con un 429.
-            NOT: { payload: { path: ['viaDevice'], equals: true } },
-          },
-        }),
-        this.prisma.message.count({
-          where: { tenantId, direction: 'out', createdAt: { gt: new Date(now - DAY_MS) } },
-        }),
-        this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { plan: true } }),
-      ]);
+      const hourAgo = new Date(now - HOUR_MS);
+      const dayAgo = new Date(now - DAY_MS);
+      // Una conversación en frío que RECIBE respuesta deja de ser fría y sale de
+      // estos conteos: quien acierta con su mensaje recupera cupo, y a quien nadie
+      // contesta se le queda el tope pegado. Es la mejor señal disponible de "¿este
+      // contacto era bienvenido?" y no cuesta una línea.
+      const coldWhere = { tenantId, lastInboundAt: null, messages: { some: { direction: 'out' as const } } };
+      const [contactLastHour, tenantLastDay, coldConversationOut, coldTenantHour, coldTenantDay, tenant] =
+        await Promise.all([
+          this.prisma.message.count({
+            where: {
+              tenantId,
+              // Por CONTACTO, no por conversación: el worker abre una conversación
+              // nueva cuando la anterior está cerrada, así que con el conteo por
+              // conversación bastaba cerrar el hilo para resetear este tope.
+              conversation: { contactId: conv.contactId },
+              direction: 'out',
+              createdAt: { gt: hourAgo },
+              // El eco de lo que el dueño manda desde su teléfono NO cuenta: si
+              // contara, cuatro respuestas rápidas desde el celular bloquearían al
+              // agente con un 429.
+              NOT: { payload: { path: ['viaDevice'], equals: true } },
+            },
+          }),
+          this.prisma.message.count({
+            where: { tenantId, direction: 'out', createdAt: { gt: dayAgo } },
+          }),
+          cold
+            ? this.prisma.message.count({
+                where: { tenantId, conversationId: conv.id, direction: 'out' },
+              })
+            : Promise.resolve(0),
+          cold
+            ? this.prisma.conversation.count({ where: { ...coldWhere, createdAt: { gt: hourAgo } } })
+            : Promise.resolve(0),
+          cold
+            ? this.prisma.conversation.count({ where: { ...coldWhere, createdAt: { gt: dayAgo } } })
+            : Promise.resolve(0),
+          this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { plan: true } }),
+        ]);
       const verdict = checkLimits(
-        { contactLastHour, tenantLastDay },
+        { contactLastHour, tenantLastDay, coldConversationOut, coldTenantHour, coldTenantDay },
         this.limits,
         tenant?.plan ?? 'free',
-        { isGroup },
+        { isGroup, cold },
       );
       if (!verdict.allowed) throw new HttpException(verdict.message, HttpStatus.TOO_MANY_REQUESTS);
     } catch (e) {
-      // El 429 sí sube; un fallo del contador NO deja sin servicio (fail-open).
       if (e instanceof HttpException) throw e;
-      this.logger.warn(`No se pudo evaluar el cupo de la capa gratuita: ${(e as Error).message}`);
+      this.logger.warn(`No se pudo evaluar el cupo: ${(e as Error).message}`);
+      // Fail-open SOLO en caliente: refusar la respuesta a un cliente que espera es
+      // un fallo que él ve, y un mensaje de más no cuesta nada.
+      //
+      // En FRÍO se falla CERRADO, y por tres razones: nadie está esperando ese
+      // mensaje, pasarse no tiene deshacer (un número baneado, una WABA con la
+      // calidad por el suelo), y un contador que falla es justo el síntoma de la
+      // ráfaga que queremos parar. 503 y no 429: es fallo NUESTRO, así el worker del
+      // envío masivo reintenta en vez de marcar al destinatario como fallido.
+      if (cold) {
+        throw new HttpException(
+          'No se pudo verificar el cupo de mensajes en frío. Inténtalo en un momento.',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
     }
   }
 
@@ -369,7 +407,7 @@ export class MessagingService {
     if (adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
     }
-    await this.assertWithinLimits(adapter, tenantId, conversationId, conv.contact.isGroup);
+    await this.assertWithinLimits(adapter, tenantId, conv, conv.contact.isGroup);
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
     const filename = kind === 'document' ? file.originalname : undefined;
