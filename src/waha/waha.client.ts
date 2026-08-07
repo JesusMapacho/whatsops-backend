@@ -201,6 +201,35 @@ export async function requestPairingCode(
   return code;
 }
 
+// ¿Existe este número en WhatsApp?
+//
+// Enviar a números que NO existen es una de las señales de spam masivo más fuertes:
+// es literalmente lo que hace un bot recorriendo rangos. De paso WAHA devuelve el
+// chatId CANÓNICO, que es mejor que cualquiera que construyamos nosotros (resuelve
+// el problema del 52/521 en México sin adivinar).
+//
+// `null` = no se pudo comprobar. En un envío masivo eso se salta, no se arriesga.
+export async function checkNumberExists(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  phone: string,
+): Promise<{ exists: boolean; chatId: string | null } | null> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/contacts/check-exists?phone=${encodeURIComponent(phone)}&session=${encodeURIComponent(session)}`,
+    'GET',
+  ).catch(() => null);
+  if (!res?.ok) return null;
+  const json: any = await res.json().catch(() => null);
+  if (!json || typeof json.numberExists !== 'boolean') return null;
+  return {
+    exists: json.numberExists,
+    chatId: typeof json.chatId === 'string' && json.chatId ? json.chatId : null,
+  };
+}
+
 // Foto de perfil de un chat. Devuelve la URL que da WAHA (puede ser null si no hay
 // foto o la sesión aún sincroniza).
 export async function fetchChatPictureUrl(

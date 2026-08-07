@@ -1,6 +1,13 @@
 import { Prisma, ConversationStatus } from '@prisma/client';
 
-export type ConversationFilter = 'open' | 'mine' | 'unassigned';
+export type ConversationFilter = 'open' | 'mine' | 'unassigned' | 'frio';
+
+// Tope de la bandeja. Antes no había ninguno, y con envíos en frío una lista sin
+// tope significa pintar 5000 conversaciones y meter 5000 ids en el IN del conteo
+// de no-leídos.
+// ponytail: sin paginación real. Upgrade cuando alguien pida ver más allá de 200:
+// cursor por `updatedAt`, que ya es el orden.
+export const INBOX_TAKE = 200;
 
 // Un agente solo puede ver/actuar sobre conversaciones suyas o abiertas.
 // El admin no tiene esta restricción.
@@ -62,6 +69,11 @@ export function buildConversationWhere(
       return withExtra({ tenantId, assignedUserId: null });
     case 'open':
       return withExtra({ tenantId, status: 'open' });
+    // En frío = nunca nos han contestado. Es `lastInboundAt: null`, no "fuera de la
+    // ventana": quien escribió hace tres días ya nos conoce. Es la vista de "a quién
+    // le escribí y no me ha contestado".
+    case 'frio':
+      return withExtra({ tenantId, lastInboundAt: null });
     default:
       return withExtra({ tenantId });
   }

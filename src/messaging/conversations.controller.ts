@@ -14,6 +14,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { MessagingService, UploadedMediaFile } from './messaging.service';
 import { ConversationsService } from './conversations.service';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
+import { RequirePermissions } from '../auth/permissions.decorator';
 import { WahaService } from '../waha/waha.service';
 
 @Controller('conversations')
@@ -32,6 +33,17 @@ export class ConversationsController {
     @Query('assignedUserId') assignedUserId?: string,
   ) {
     return this.conversations.list(user.tenantId, filter, user.userId, user.role, q, assignedUserId);
+  }
+
+  // Abrir conversación con un número que nunca nos ha escrito. No envía: deja el
+  // hilo listo y el envío va por el camino normal (`POST :id/messages`), que es
+  // donde viven los topes en frío y la resolución de plantilla.
+  //
+  // Permiso aparte de `conversations:write`: contestar es de agente, prospectar no.
+  @Post()
+  @RequirePermissions('conversations:outbound')
+  start(@CurrentUser() user: AuthUser, @Body() body: any) {
+    return this.messaging.startConversation(user.tenantId, body);
   }
 
   @Get(':id/messages')

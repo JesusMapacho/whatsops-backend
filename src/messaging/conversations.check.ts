@@ -46,6 +46,16 @@ assert.deepStrictEqual(buildConversationWhere(T, 'open', U, 'admin', '  '), {
   status: 'open',
 });
 
+// Filtro 'frio' = conversaciones que ABRIMOS nosotros y nadie ha contestado.
+// `lastInboundAt: null`, NO "fuera de la ventana de 24 h": quien escribió hace tres
+// días ya nos conoce y no cuenta como frío.
+assert.deepStrictEqual(buildConversationWhere(T, 'frio', U, 'admin'), {
+  tenantId: T,
+  lastInboundAt: null,
+});
+// Un agente no lo obtiene aunque lo pida: sigue viendo solo las suyas o abiertas.
+assert.deepStrictEqual(buildConversationWhere(T, 'frio', U, 'agent'), agentWhere);
+
 // parseStatus: acepta el enum, rechaza lo demás.
 assert.strictEqual(parseStatus('closed'), 'closed');
 assert.strictEqual(parseStatus('open'), 'open');

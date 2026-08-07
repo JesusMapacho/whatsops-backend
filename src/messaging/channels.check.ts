@@ -183,4 +183,16 @@ assert.deepStrictEqual(waha.extraMimes, ['audio/webm', 'audio/ogg']);
 assert.strictEqual(wa.extraMimes, undefined);
 assert.strictEqual(msn.extraMimes, undefined);
 
+// --- Escribir primero (feature 29) ---
+// En Messenger/IG es IMPOSIBLE, no difícil: de un teléfono no se deriva un PSID ni
+// un IGSID, y este adaptador tampoco soporta plantillas. Que sea una capacidad y no
+// un `if (platform === ...)` es lo que impide que alguien lo "arregle" con un caso
+// especial en el servicio.
+assert.strictEqual(msn.supportsColdOutreach, false);
+assert.strictEqual(ig.supportsColdOutreach, false);
+assert.strictEqual(wa.supportsColdOutreach, true, 'Cloud API con plantilla es justo lo que Meta permite');
+assert.strictEqual(waha.supportsColdOutreach, true);
+// Y el que no tiene ventana es el único al que los topes en frío contienen de verdad.
+assert.ok(waha.paced && !waha.enforcesWindow);
+
 console.log('channels.check OK');

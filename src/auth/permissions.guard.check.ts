@@ -3,6 +3,7 @@ import * as assert from 'node:assert';
 import { Reflector } from '@nestjs/core';
 import { PermissionsGuard } from './permissions.guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { SYSTEM_ROLE_PERMISSIONS } from './permissions.catalog';
 
 // Fakes mínimos.
 function reflectorReturning(perms: string[] | undefined): Reflector {
@@ -53,6 +54,20 @@ async function run() {
   g = new PermissionsGuard(
     reflectorReturning(['conversations:write', 'users:manage']),
     prismaWithPerms(['conversations:write']),
+  );
+  await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
+
+  // El rol `agent` NO trae `conversations:outbound` de fábrica: contestar es de
+  // agente, prospectar es de admin. Si alguien lo mete en la lista de sistema, todos
+  // los agentes de todos los tenants pueden escribirle a desconocidos en el próximo
+  // arranque (ensureSystemRoles se ejecuta en onModuleInit y solo AGREGA permisos).
+  assert.ok(!SYSTEM_ROLE_PERMISSIONS.agent.includes('conversations:outbound'));
+  assert.ok(SYSTEM_ROLE_PERMISSIONS.admin.includes('conversations:outbound'));
+  // Y sigue siendo un permiso, no un chequeo de rol suelto: un rol a medida que no
+  // lo tenga recibe 403 aunque pueda operar conversaciones.
+  g = new PermissionsGuard(
+    reflectorReturning(['conversations:outbound']),
+    prismaWithPerms(['conversations:read', 'conversations:write']),
   );
   await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
 

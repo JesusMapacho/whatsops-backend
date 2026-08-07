@@ -24,6 +24,13 @@ export const PERMISSION_CATALOG: PermissionMeta[] = [
     description: 'Responder, asignar, cerrar y anotar conversaciones.',
   },
   {
+    key: 'conversations:outbound',
+    label: 'Iniciar conversaciones',
+    group: 'Conversaciones',
+    description:
+      'Escribir a números que nunca nos han escrito, y envíos masivos. Los agentes contestan; prospectar es de admin.',
+  },
+  {
     key: 'waba:create',
     label: 'Gestionar conexiones',
     group: 'Conexiones',
@@ -74,6 +81,10 @@ export type PermissionKey = (typeof PERMISSION_CATALOG)[number]['key'];
 
 // Permisos que recibe cada rol de sistema al sembrarse.
 // admin = todos; agent = operar conversaciones.
+//
+// `conversations:outbound` queda FUERA de agent a propósito: escribir a desconocidos
+// arriesga la reputación del número del negocio (y en la capa gratuita, la de la
+// instancia compartida). Contestar es de agente; prospectar es de admin.
 export const SYSTEM_ROLE_PERMISSIONS: Record<'admin' | 'agent', PermissionKey[]> = {
   admin: PERMISSION_CATALOG.map((p) => p.key),
   agent: ['conversations:read', 'conversations:write'],

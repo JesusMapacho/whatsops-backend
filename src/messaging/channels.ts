@@ -28,6 +28,12 @@ export interface ChannelAdapter {
   // El transporte no oficial arriesga el número del tenant: se le aplica ritmo y
   // cupo (ver limits.ts). Los canales de Meta ya los limita Meta.
   paced?: boolean;
+  // ¿Se puede escribir a un número que nunca nos escribió?
+  //
+  // Messenger/Instagram: NO, y es imposible, no difícil — de un teléfono no se deriva
+  // un PSID/IGSID, y este adaptador tampoco soporta plantillas. Rechazarlo aquí evita
+  // crear una conversación que jamás podría enviar nada.
+  supportsColdOutreach: boolean;
   // MIMEs que este canal acepta ADEMÁS de la lista blanca de la Cloud API
   // (MEDIA_LIMITS). WAHA transcodifica con ffmpeg, así que traga lo que graba el
   // navegador; la lista de Meta no se ensancha por ello.
@@ -71,6 +77,8 @@ const whatsapp: ChannelAdapter = {
   supportsTemplate: true,
   needsMediaUpload: true,
   enforcesWindow: true,
+  // Con plantilla aprobada: es justo lo que Meta permite para iniciar.
+  supportsColdOutreach: true,
   windowClosedMessage: 'Ventana de 24 h cerrada: solo se permiten mensajes de plantilla.',
   sendUrl: messagesUrl,
   authHeaders: bearer,
@@ -94,6 +102,7 @@ const messaging: ChannelAdapter = {
   supportsTemplate: false,
   needsMediaUpload: false,
   enforcesWindow: true,
+  supportsColdOutreach: false,
   windowClosedMessage:
     'Ventana de 24 h cerrada: este canal no permite iniciar conversación fuera de la ventana.',
   sendUrl: messagesUrl,
@@ -163,6 +172,9 @@ const waha: ChannelAdapter = {
   enforcesWindow: false,
   mediaAsBase64: true,
   paced: true,
+  // Técnicamente sí, y por eso los topes en frío son lo único que lo contiene: aquí
+  // no hay ventana ni plantillas que obliguen a nada.
+  supportsColdOutreach: true,
   // WAHA transcodifica con ffmpeg, así que acepta lo que graba el navegador
   // (Chrome/Edge dan audio/webm; Safari audio/mp4).
   extraMimes: ['audio/webm', 'audio/ogg'],

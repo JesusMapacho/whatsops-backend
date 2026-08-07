@@ -29,8 +29,15 @@ import {
   unsupportedTemplateReason,
 } from './template-params';
 import { checkLimits, DAY_MS, HOUR_MS, isCold, LimitConfig, limitsFromEnv } from './limits';
+import { coldWaId, openConversation, parsePhone, resolveContact } from './contact-resolve';
 import { StorageService } from '../storage/storage.service';
-import { fetchChatPictureUrl, sendReaction, sendSeen, setTyping } from '../waha/waha.client';
+import {
+  checkNumberExists,
+  fetchChatPictureUrl,
+  sendReaction,
+  sendSeen,
+  setTyping,
+} from '../waha/waha.client';
 import { fetchPayloadBinary } from '../waha/waha.url';
 import { applyReaction, REACTION_ME } from '../webhook/mutations';
 
@@ -59,6 +66,10 @@ export class MessagingService {
   // Instancia WAHA gestionada. Una conexión con `baseUrl` propio (BYO) la pisa.
   private readonly wahaUrl: string;
   private readonly limits: LimitConfig;
+  // La feature entra APAGADA. Escribir a desconocidos arriesga el número del tenant
+  // (y en la capa gratuita la reputación de la instancia compartida), así que se
+  // enciende a conciencia por despliegue, no por defecto.
+  private readonly coldEnabled: boolean;
   private readonly logger = new Logger(MessagingService.name);
   private readonly typingAt = new Map<string, number>();
 
@@ -73,6 +84,7 @@ export class MessagingService {
     this.publicBaseUrl = config.get<string>('PUBLIC_BASE_URL') ?? '';
     this.wahaUrl = config.get<string>('WAHA_URL') ?? '';
     this.limits = limitsFromEnv((k) => config.get<string>(k));
+    this.coldEnabled = config.get<string>('COLD_OUTREACH_ENABLED') === 'true';
   }
 
   async send(tenantId: string, conversationId: string, body: any) {
@@ -138,6 +150,86 @@ export class MessagingService {
     });
     this.events.emitToTenant(tenantId, 'message:new', message);
     return message;
+  }
+
+  // Abre una conversación con un número que NUNCA nos ha escrito.
+  //
+  // No envía nada: deja la conversación lista y devuelve su id para que el flujo
+  // normal de `send` haga el envío (y aplique ahí los topes en frío, la resolución de
+  // plantilla y todo lo demás, sin duplicar reglas).
+  async startConversation(tenantId: string, body: any) {
+    if (!this.coldEnabled) {
+      throw new BadRequestException('Iniciar conversaciones está desactivado en este servidor.');
+    }
+    const phone = parsePhone(body?.phone);
+    if (!phone.ok) throw new BadRequestException(phone.reason);
+
+    const connectionId = typeof body?.wabaConnectionId === 'string' ? body.wabaConnectionId : '';
+    if (!connectionId) throw new BadRequestException('Elige desde qué número enviar.');
+    // EL `tenantId` DE ESTE `where` ES LA FRONTERA. El id viene del formulario, así
+    // que sin él un tenant podría enviar por el WhatsApp de otro.
+    const conn = await this.prisma.wabaConnection.findFirst({
+      where: { id: connectionId, tenantId },
+    });
+    if (!conn) throw new NotFoundException('Conexión no encontrada');
+
+    const adapter = channelAdapter(conn.platform);
+    if (!adapter.supportsColdOutreach) {
+      throw new BadRequestException(
+        'Este canal no permite iniciar conversación: su id no se puede derivar de un teléfono.',
+      );
+    }
+
+    // El tenant tiene que haber aceptado el aviso una vez. Se comprueba en SERVIDOR
+    // para que un script no pueda saltarse la pantalla.
+    // ponytail: la aceptación viaja como `ack: true` en el primer envío en vez de
+    // tener endpoint propio. El código de error es lo que dispara la pantalla.
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { coldOutreachAckedAt: true },
+    });
+    if (!tenant?.coldOutreachAckedAt) {
+      if (body?.ack !== true) throw new BadRequestException('COLD_OUTREACH_NOT_ACKED');
+      await this.prisma.tenant.update({
+        where: { id: tenantId },
+        data: { coldOutreachAckedAt: new Date() },
+      });
+    }
+
+    // El id que da el proveedor manda sobre el que construyamos: en WAHA además
+    // confirma que el número existe en WhatsApp.
+    let waId = coldWaId(conn.platform, phone.digits);
+    if (conn.platform === 'waha') {
+      const check = await checkNumberExists(
+        conn.baseUrl ?? this.wahaUrl,
+        this.crypto.decrypt(conn.accessTokenEnc),
+        conn.phoneNumberId,
+        phone.digits,
+      );
+      if (check && !check.exists) {
+        throw new BadRequestException('Ese número no tiene WhatsApp.');
+      }
+      if (check?.chatId) waId = check.chatId;
+    }
+
+    const contact = await resolveContact(this.prisma, {
+      tenantId,
+      platform: conn.platform,
+      waId,
+      phone: phone.digits,
+      name: typeof body?.name === 'string' && body.name.trim() ? body.name.trim() : null,
+    });
+    const conversation = await openConversation(this.prisma, {
+      tenantId,
+      platform: conn.platform,
+      contactId: contact.id,
+      wabaConnectionId: conn.id,
+      // FRÍO: deja lastInboundAt en null, que es lo que obliga a Cloud a usar
+      // plantilla y lo que hace que cuente para los topes de primer contacto.
+      inbound: false,
+    });
+    this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversation.id });
+    return { id: conversation.id, contactId: contact.id, platform: conn.platform };
   }
 
   // Construye el `components` de la Cloud API a partir de los valores del operador.

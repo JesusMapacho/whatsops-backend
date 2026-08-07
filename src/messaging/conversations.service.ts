@@ -4,7 +4,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { StorageService } from '../storage/storage.service';
 import { withMediaUrl } from './media.util';
-import { buildConversationWhere, conversationScopeWhere, parseStatus } from './conversations.util';
+import {
+  buildConversationWhere,
+  conversationScopeWhere,
+  INBOX_TAKE,
+  parseStatus,
+} from './conversations.util';
 import { MessagingService } from './messaging.service';
 
 @Injectable()
@@ -58,6 +63,7 @@ export class ConversationsService {
         assignedUser: { select: { id: true, email: true } },
       },
       orderBy: { updatedAt: 'desc' },
+      take: INBOX_TAKE,
     });
 
     // Conteo de no leídos en UNA query: el corte (lastReadAt) es por conversación,

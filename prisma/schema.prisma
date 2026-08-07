@@ -76,6 +76,9 @@ model Tenant {
   // Branding white-label (v2 feature 16). name (arriba) = nombre del negocio.
   accentColor String? // hex #rrggbb; null = usa el acento por defecto del sistema
   logoKey     String? // key de StorageService; null = sin logo
+  // Cuándo aceptó este negocio el aviso de escribir a desconocidos (v5 feature 29).
+  // null = todavía no; el servidor lo exige, no la UI.
+  coldOutreachAckedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
