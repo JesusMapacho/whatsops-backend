@@ -20,6 +20,13 @@ const SENSITIVE_KEYS = [
   'pan',
   'cvv',
   'cvc',
+  // Listas de destinatarios de un envío masivo (v5 feature 29). No son secretos
+  // nuestros: son PII de gente que TODAVÍA NO ES CLIENTE. Sin esto, un 500 al crear
+  // el envío persiste el CSV entero en `ErrorLog.requestBody`, que el super-admin lee
+  // cross-tenant.
+  'csv',
+  'recipients',
+  'phones',
 ];
 
 const REDACTED = '[REDACTED]';

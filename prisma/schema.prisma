@@ -93,6 +93,7 @@ model Tenant {
   notes           Note[]
   cannedResponses CannedResponse[]
   paymentMethods  PaymentMethod[]
+  broadcasts      Broadcast[]
   subscription    Subscription?
 }
 
@@ -192,6 +193,7 @@ model User {
   assignedConversations Conversation[] @relation("AssignedAgent")
   notes               Note[]
   verificationCodes   VerificationCode[]
+  broadcasts          Broadcast[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -247,9 +249,69 @@ model WabaConnection {
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
+  broadcasts    Broadcast[]
 
   @@unique([platform, phoneNumberId])
   @@index([tenantId])
+}
+
+// Envío masivo en frío (v5 feature 29).
+//
+// Existe como tabla por una razón que decide sola: los destinatarios que fallan
+// ANTES de que exista un Message (número inválido, sin WhatsApp, tope alcanzado,
+// cuenta suspendida) no tienen dónde colgar el motivo — y "quién no lo recibió y por
+// qué" es la única pregunta que se hace después de un envío.
+model Broadcast {
+  id               String   @id @default(cuid())
+  tenantId         String
+  wabaConnectionId String
+  createdById      String
+  // 'text' (WAHA) | 'template' (Cloud API, la única forma legal de escribir en frío).
+  type             String
+  text             String?
+  templateName     String?
+  templateLanguage String?
+  // running | paused | canceled | done
+  status           String   @default("running")
+  // Por qué se pausó o canceló: tope alcanzado, cortacircuitos, o el operador.
+  reason           String?
+  // Fallos SEGUIDOS. Se reinicia a 0 con cada envío bueno; al llegar al tope, pausa.
+  consecutiveFailures Int   @default(0)
+  total            Int
+  sent             Int      @default(0)
+  failed           Int      @default(0)
+  skipped          Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant         Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  wabaConnection WabaConnection       @relation(fields: [wabaConnectionId], references: [id], onDelete: Cascade)
+  createdBy      User                 @relation(fields: [createdById], references: [id])
+  recipients     BroadcastRecipient[]
+
+  @@index([tenantId, status])
+}
+
+model BroadcastRecipient {
+  id          String    @id @default(cuid())
+  broadcastId String
+  phone       String
+  // Valores de las variables de la plantilla, resueltos en la SUBIDA. Así el worker
+  // no necesita el CSV: no hay que guardarlo (es PII de gente que todavía no es
+  // cliente) y el job de la cola sigue pesando ~30 bytes.
+  vars        Json?
+  // pending | sent | failed | skipped
+  status      String    @default("pending")
+  reason      String?
+  messageId   String?
+  sentAt      DateTime?
+
+  broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+
+  // Todo el deduplicado del envío, en una línea: `createMany({ skipDuplicates })`
+  // colapsa los repetidos del CSV sin recorrerlos a mano.
+  @@unique([broadcastId, phone])
+  @@index([broadcastId, status])
 }
 
 model Contact {

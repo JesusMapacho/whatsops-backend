@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Platform } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { EventsGateway } from '../events/events.gateway';
@@ -28,7 +29,15 @@ import {
   templateParams,
   unsupportedTemplateReason,
 } from './template-params';
-import { checkLimits, DAY_MS, HOUR_MS, isCold, LimitConfig, limitsFromEnv } from './limits';
+import {
+  checkLimits,
+  DAY_MS,
+  HOUR_MS,
+  isCold,
+  LimitConfig,
+  LimitVerdict,
+  limitsFromEnv,
+} from './limits';
 import { coldWaId, openConversation, parsePhone, resolveContact } from './contact-resolve';
 import { StorageService } from '../storage/storage.service';
 import {
@@ -152,18 +161,15 @@ export class MessagingService {
     return message;
   }
 
-  // Abre una conversación con un número que NUNCA nos ha escrito.
+  // Puerta ÚNICA de todo lo que escribe primero (uno a uno y masivo). Devuelve la
+  // conexión validada; si algo no cuadra, lanza.
   //
-  // No envía nada: deja la conversación lista y devuelve su id para que el flujo
-  // normal de `send` haga el envío (y aplique ahí los topes en frío, la resolución de
-  // plantilla y todo lo demás, sin duplicar reglas).
-  async startConversation(tenantId: string, body: any) {
+  // Es un solo método a propósito: cuatro cerrojos duplicados en dos sitios acaban
+  // divergiendo, y el que divergiría es justo el camino que le escribe a desconocidos.
+  async assertColdAllowed(tenantId: string, body: any) {
     if (!this.coldEnabled) {
       throw new BadRequestException('Iniciar conversaciones está desactivado en este servidor.');
     }
-    const phone = parsePhone(body?.phone);
-    if (!phone.ok) throw new BadRequestException(phone.reason);
-
     const connectionId = typeof body?.wabaConnectionId === 'string' ? body.wabaConnectionId : '';
     if (!connectionId) throw new BadRequestException('Elige desde qué número enviar.');
     // EL `tenantId` DE ESTE `where` ES LA FRONTERA. El id viene del formulario, así
@@ -195,22 +201,43 @@ export class MessagingService {
         data: { coldOutreachAckedAt: new Date() },
       });
     }
+    return conn;
+  }
 
-    // El id que da el proveedor manda sobre el que construyamos: en WAHA además
-    // confirma que el número existe en WhatsApp.
-    let waId = coldWaId(conn.platform, phone.digits);
-    if (conn.platform === 'waha') {
-      const check = await checkNumberExists(
-        conn.baseUrl ?? this.wahaUrl,
-        this.crypto.decrypt(conn.accessTokenEnc),
-        conn.phoneNumberId,
-        phone.digits,
-      );
-      if (check && !check.exists) {
-        throw new BadRequestException('Ese número no tiene WhatsApp.');
-      }
-      if (check?.chatId) waId = check.chatId;
-    }
+  // waId definitivo de un número al que vamos a escribir por primera vez.
+  //
+  // Preguntar es mejor que construir: WAHA devuelve el chatId CANÓNICO, que resuelve
+  // el 52/521 de México sin adivinar, y de paso dice si el número existe en WhatsApp
+  // (enviar a números que no existen es de las señales de spam más fuertes).
+  // `exists: null` = no se pudo comprobar; eso no bloquea.
+  async coldWaIdFor(
+    conn: { platform: Platform; baseUrl: string | null; phoneNumberId: string; accessTokenEnc: string },
+    digits: string,
+  ): Promise<{ waId: string; exists: boolean | null }> {
+    const fallback = coldWaId(conn.platform, digits);
+    if (conn.platform !== 'waha') return { waId: fallback, exists: null };
+    const check = await checkNumberExists(
+      conn.baseUrl ?? this.wahaUrl,
+      this.crypto.decrypt(conn.accessTokenEnc),
+      conn.phoneNumberId,
+      digits,
+    );
+    if (!check) return { waId: fallback, exists: null };
+    return { waId: check.chatId ?? fallback, exists: check.exists };
+  }
+
+  // Abre una conversación con un número que NUNCA nos ha escrito.
+  //
+  // No envía nada: deja la conversación lista y devuelve su id para que el flujo
+  // normal de `send` haga el envío (y aplique ahí los topes en frío, la resolución de
+  // plantilla y todo lo demás, sin duplicar reglas).
+  async startConversation(tenantId: string, body: any) {
+    const phone = parsePhone(body?.phone);
+    if (!phone.ok) throw new BadRequestException(phone.reason);
+    const conn = await this.assertColdAllowed(tenantId, body);
+
+    const { waId, exists } = await this.coldWaIdFor(conn, phone.digits);
+    if (exists === false) throw new BadRequestException('Ese número no tiene WhatsApp.');
 
     const contact = await resolveContact(this.prisma, {
       tenantId,
@@ -230,6 +257,23 @@ export class MessagingService {
     });
     this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversation.id });
     return { id: conversation.id, contactId: contact.id, platform: conn.platform };
+  }
+
+  // Cuántos valores pide esta plantilla, comprobando de paso que existe, que sigue
+  // APROBADA y que la soportamos. Para el envío masivo: validar el CSV contra la
+  // plantilla en la SUBIDA es la diferencia entre "faltan valores, arregla la
+  // columna" y 500 errores 132xxx, uno por destinatario.
+  async templateParamCount(tenantId: string, name: string, language: string): Promise<number> {
+    const tpl = await this.prisma.template.findUnique({
+      where: { tenantId_name_language: { tenantId, name, language } },
+    });
+    if (!tpl) throw new BadRequestException('Esa plantilla no existe. Sincroniza las plantillas.');
+    if (tpl.status !== 'APPROVED') {
+      throw new BadRequestException(`La plantilla "${tpl.name}" ya no está aprobada por Meta.`);
+    }
+    const reason = unsupportedTemplateReason(tpl.components);
+    if (reason) throw new BadRequestException(reason);
+    return templateParams(tpl.components).length;
   }
 
   // Construye el `components` de la Cloud API a partir de los valores del operador.
@@ -489,6 +533,44 @@ export class MessagingService {
           HttpStatus.SERVICE_UNAVAILABLE,
         );
       }
+    }
+  }
+
+  // ¿Cabe UNA conversación nueva en frío más? Para el envío masivo, que necesita el
+  // veredicto ANTES de crear contacto y conversación: comprobarlo después dejaría
+  // 480 conversaciones huérfanas cada vez que un envío se aborta por tope.
+  //
+  // `null` = no se pudo medir. Quien llama decide, y en frío la respuesta es parar
+  // (ver decideRecipient): aquí nadie está esperando el mensaje.
+  async coldQuota(tenantId: string): Promise<LimitVerdict | null> {
+    try {
+      const now = Date.now();
+      // Una conversación en frío que RECIBE respuesta deja de ser fría y sale del
+      // conteo: quien acierta con su mensaje recupera cupo en la hora.
+      const coldWhere = {
+        tenantId,
+        lastInboundAt: null,
+        messages: { some: { direction: 'out' as const } },
+      };
+      const [coldTenantHour, coldTenantDay, tenant] = await Promise.all([
+        this.prisma.conversation.count({
+          where: { ...coldWhere, createdAt: { gt: new Date(now - HOUR_MS) } },
+        }),
+        this.prisma.conversation.count({
+          where: { ...coldWhere, createdAt: { gt: new Date(now - DAY_MS) } },
+        }),
+        this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { plan: true } }),
+      ]);
+      return checkLimits(
+        // La conversación todavía no existe, así que no puede tener salientes.
+        { contactLastHour: 0, tenantLastDay: 0, coldConversationOut: 0, coldTenantHour, coldTenantDay },
+        this.limits,
+        tenant?.plan ?? 'free',
+        { cold: true },
+      );
+    } catch (e) {
+      this.logger.warn(`No se pudo evaluar el cupo en frío: ${(e as Error).message}`);
+      return null;
     }
   }
 

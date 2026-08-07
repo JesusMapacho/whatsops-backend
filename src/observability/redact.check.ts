@@ -33,4 +33,14 @@ assert.strictEqual(out.headers['x-webhook-hmac'], 'abc');
 // No muta la entrada original.
 assert.strictEqual(input.password, 'secret123', 'entrada original intacta');
 
+// Listas de destinatarios: PII de gente que todavía NO es cliente. Un 500 al crear
+// un envío masivo persistiría el CSV entero en ErrorLog.requestBody, que el
+// super-admin lee cross-tenant.
+const envio = redact({ csv: '5218715172350,Ana\n5215555555555,Luis', confirmCount: 2 }) as any;
+assert.strictEqual(envio.csv, '[REDACTED]');
+// El resto del cuerpo sigue siendo legible: sin eso el log no sirve para depurar.
+assert.strictEqual(envio.confirmCount, 2);
+assert.strictEqual((redact({ recipients: ['5218715172350'] }) as any).recipients, '[REDACTED]');
+assert.strictEqual((redact({ phones: ['5218715172350'] }) as any).phones, '[REDACTED]');
+
 console.log('redact.check OK');
