@@ -54,4 +54,18 @@ assert.ok(
 // Pero el cupo diario sí los ve y corta al llegar al tope.
 assert.ok(!checkLimits({ contactLastHour: 0, tenantLastDay: 200 }, cfg, 'free').allowed);
 
+// --- Grupos exentos del ritmo por contacto ---
+// 4 mensajes/hora haría inusable cualquier grupo con algo de actividad. El ritmo
+// protege de parecer spam ante UNA persona; en un grupo no aplica.
+assert.ok(
+  checkLimits({ contactLastHour: 99, tenantLastDay: 0 }, cfg, 'free', { isGroup: true }).allowed,
+  'un grupo no debe topar con el ritmo por contacto',
+);
+// Pero el cupo diario SÍ sigue vigente en grupos: protege la reputación del número.
+assert.ok(
+  !checkLimits({ contactLastHour: 0, tenantLastDay: 200 }, cfg, 'free', { isGroup: true }).allowed,
+);
+// Y un 1-a-1 no cambia de comportamiento por el parámetro nuevo.
+assert.ok(!checkLimits({ contactLastHour: 4, tenantLastDay: 0 }, cfg, 'free', {}).allowed);
+
 console.log('limits.check OK');

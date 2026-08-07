@@ -139,19 +139,24 @@ function asStatus(v: unknown): MessageStatus | null {
   return typeof v === 'string' && STATUSES.has(v) ? (v as MessageStatus) : null;
 }
 
-// Sufijos de chat que NO son una conversación 1-a-1: grupos, canales y los
-// estados/difusión (`status@broadcast`). Todo lo demás se acepta como directo:
-// además de `@c.us` hay `@lid` (LID addressing, lo que usa WhatsApp moderno con
-// multi-dispositivo) y `@s.whatsapp.net`.
+// Sufijos que NO son una conversación atendible: canales de difusión y los
+// estados (`status@broadcast`). Los GRUPOS (`@g.us`) sí se atienden desde la
+// feature 28 — los negocios pequeños los usan constantemente.
 //
 // Es una lista NEGRA a propósito, no blanca: descartar en silencio el mensaje de
 // un cliente real es el peor fallo posible de este producto, mientras que colar
 // una conversación basura es visible y se borra. Con lista blanca de `@c.us` los
 // mensajes con LID se perdían sin dejar rastro.
-const NOT_DIRECT = ['@g.us', '@newsletter', '@broadcast'];
+const NOT_ATTENDED = ['@newsletter', '@broadcast'];
 
-function isDirectChat(from: string): boolean {
-  return !!from && !NOT_DIRECT.some((s) => from.endsWith(s));
+function isAttendedChat(from: string): boolean {
+  return !!from && !NOT_ATTENDED.some((s) => from.endsWith(s));
+}
+
+// Chat de grupo. El "contacto" pasa a ser el grupo y el autor concreto de cada
+// mensaje va aparte, en `payload.author`.
+function isGroupChat(chat: string): boolean {
+  return chat.endsWith('@g.us');
 }
 
 // Un mensaje de WAHA (entrante o eco propio) → forma interna. `null` si no
@@ -164,12 +169,19 @@ function decodeWahaMessage(payload: any): InboundMessage | null {
   const chat: string = payload.fromMe
     ? key.remoteJid || payload.to || payload.from || ''
     : payload.from || '';
-  if (!payload.id || !isDirectChat(chat)) return null;
+  if (!payload.id || !isAttendedChat(chat)) return null;
 
   const mime: string | undefined = payload.media?.mimetype;
   const type = payload.hasMedia && mime ? kindForMime(mime) : 'text';
+  const group = isGroupChat(chat);
+  // En un grupo, `from` es el GRUPO y quien habló va en `participant`. Sin esto
+  // todos los miembros colapsarían en un solo contacto cuyo nombre cambiaría con
+  // cada mensaje.
+  const authorWaId: string = group ? (payload.participant ?? key.participant ?? '') : '';
   // Con LID addressing el chat no es un número; el teléfono real viene aparte.
-  const phone = digitsOf(key.remoteJidAlt);
+  // En un grupo no aplica: `remoteJidAlt` sería del grupo, no de una persona.
+  const phone = group ? undefined : digitsOf(key.remoteJidAlt);
+  const pushName = payload._data?.pushName ?? payload._data?.notifyName ?? payload.notifyName;
 
   return {
     wamid: payload.id,
@@ -188,17 +200,22 @@ function decodeWahaMessage(payload: any): InboundMessage | null {
       ...(payload._data?.message?.audioMessage?.ptt ? { voice: true } : {}),
       // Mensaje citado, para que el hilo pinte la cita.
       ...(payload.replyTo?.id ? { replyToWamid: payload.replyTo.id } : {}),
+      // Quién habló dentro del grupo. El hilo lo pinta encima de la burbuja.
+      ...(authorWaId
+        ? { author: { waId: authorWaId, ...(pushName ? { name: pushName } : {}) } }
+        : {}),
     },
     // El engine NOWEB lo manda como `_data.pushName`; otros como `notifyName`.
     // Sin esto el contacto queda sin nombre y el agente solo ve un id (que con
-    // LID no es ni un teléfono). En un eco el pushName es el del DUEÑO, no el
-    // del interlocutor: no se usa.
-    contactName: payload.fromMe
-      ? null
-      : (payload._data?.pushName ?? payload._data?.notifyName ?? payload.notifyName ?? null),
+    // LID no es ni un teléfono).
+    //
+    // En un eco el pushName es el del DUEÑO, y en un grupo es el del participante:
+    // en ninguno de los dos casos nombra al "contacto" de la conversación.
+    contactName: payload.fromMe || group ? null : (pushName ?? null),
     ...(payload.fromMe ? { direction: 'out' as const } : {}),
     ...(payload.fromMe ? { status: ACK_STATUS[Number(payload.ack)] ?? 'sent' } : {}),
     ...(phone ? { phone } : {}),
+    ...(group ? { isGroup: true } : {}),
   };
 }
 

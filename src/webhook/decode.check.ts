@@ -129,11 +129,59 @@ const wEcho = decodeWebhook(
 assert.strictEqual(wEcho[0].messages.length, 1);
 assert.strictEqual(wEcho[0].messages[0].direction, 'out');
 
-// Grupos, canales y difusión se descartan: llenarían la bandeja de basura.
-for (const from of ['12312312@g.us', 'status@broadcast', '99999@newsletter']) {
+// Canales y difusión se descartan: llenarían la bandeja de basura.
+// Los GRUPOS sí se atienden desde la feature 28 (ver más abajo).
+for (const from of ['status@broadcast', '99999@newsletter']) {
   const out = decodeWebhook(wahaEnvelope('message', { id: 'g1', from, body: 'x' }));
   assert.deepStrictEqual(out[0].messages, [], `debe descartar ${from}`);
 }
+
+// --- Grupos ---
+// En un grupo, `from` es el GRUPO y quien habló va en `participant`. Sin separarlo,
+// todos los miembros colapsarían en un solo contacto cuyo nombre cambiaría con cada
+// mensaje, y el hilo no diría quién dijo qué.
+const grupo = decodeWebhook(
+  wahaEnvelope('message', {
+    id: 'false_12345-1600000000@g.us_AAA',
+    from: '12345-1600000000@g.us',
+    participant: '521777@c.us',
+    fromMe: false,
+    body: 'hola a todos',
+    _data: { pushName: 'Beto', key: { remoteJid: '12345-1600000000@g.us' } },
+  }),
+);
+assert.strictEqual(grupo[0].messages.length, 1, 'un grupo SÍ genera mensaje');
+const gm = grupo[0].messages[0];
+assert.strictEqual(gm.from, '12345-1600000000@g.us', 'el contacto es el grupo');
+assert.strictEqual(gm.isGroup, true);
+// El autor va en el payload, no como columna.
+assert.deepStrictEqual((gm.payload as any).author, { waId: '521777@c.us', name: 'Beto' });
+// El pushName del participante NO debe pisar el nombre del grupo.
+assert.strictEqual(gm.contactName, null);
+// Ni se le atribuye al grupo el teléfono de nadie.
+assert.ok(!('phone' in gm));
+
+// El autor también sale de `_data.key.participant` cuando no viene en la raíz.
+assert.deepStrictEqual(
+  (
+    decodeWebhook(
+      wahaEnvelope('message', {
+        id: 'g2',
+        from: '999-1@g.us',
+        body: 'x',
+        _data: { key: { participant: '521888@c.us' } },
+      }),
+    )[0].messages[0].payload as any
+  ).author,
+  { waId: '521888@c.us' },
+);
+
+// En un chat 1-a-1 no hay autor ni isGroup: los campos se OMITEN.
+const directo = decodeWebhook(
+  wahaEnvelope('message', { id: 'd1', from: '521555@c.us', body: 'x' }),
+)[0].messages[0];
+assert.ok(!('isGroup' in directo));
+assert.ok(!('author' in (directo.payload as any)));
 
 // --- LID addressing: payload REAL capturado del engine NOWEB ---
 // WhatsApp moderno direcciona con `@lid` en vez de `@c.us`. Un filtro de lista
@@ -215,18 +263,31 @@ assert.strictEqual(decodeWebhook(anyIn)[0].messages[0].contactName, 'Ana');
 assert.ok(!('viaDevice' in (decodeWebhook(anyIn)[0].messages[0].payload as any)));
 assert.ok(!('direction' in decodeWebhook(anyIn)[0].messages[0]));
 
-// Un eco hacia un grupo/canal se sigue descartando.
+// Un eco hacia un CANAL se sigue descartando (no es una conversación atendible).
 assert.deepStrictEqual(
   decodeWebhook(
     wahaEnvelope('message.any', {
-      id: 'g',
+      id: 'n',
       fromMe: true,
       body: 'x',
-      _data: { key: { remoteJid: '123@g.us' } },
+      _data: { key: { remoteJid: '999@newsletter' } },
     }),
   )[0].messages,
   [],
 );
+// Pero un eco hacia un GRUPO sí entra: lo que el dueño escribe en un grupo desde su
+// teléfono también tiene que verse en la bandeja.
+const ecoGrupo = decodeWebhook(
+  wahaEnvelope('message.any', {
+    id: 'true_123-1@g.us_X',
+    fromMe: true,
+    body: 'ahí les va',
+    _data: { key: { remoteJid: '123-1@g.us' } },
+  }),
+)[0].messages;
+assert.strictEqual(ecoGrupo.length, 1);
+assert.strictEqual(ecoGrupo[0].direction, 'out');
+assert.strictEqual(ecoGrupo[0].isGroup, true);
 
 // `@s.whatsapp.net` también es un chat directo.
 assert.strictEqual(

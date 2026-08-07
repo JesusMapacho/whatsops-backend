@@ -86,7 +86,7 @@ export class MessagingService {
     if (dto.type === 'text' && adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
     }
-    await this.assertWithinLimits(adapter, tenantId, conversationId);
+    await this.assertWithinLimits(adapter, tenantId, conversationId, conv.contact.isGroup);
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
     const session = conv.wabaConnection.phoneNumberId;
@@ -251,6 +251,7 @@ export class MessagingService {
     adapter: ChannelAdapter,
     tenantId: string,
     conversationId: string,
+    isGroup = false,
   ) {
     if (!adapter.paced) return;
     try {
@@ -277,6 +278,7 @@ export class MessagingService {
         { contactLastHour, tenantLastDay },
         this.limits,
         tenant?.plan ?? 'free',
+        { isGroup },
       );
       if (!verdict.allowed) throw new HttpException(verdict.message, HttpStatus.TOO_MANY_REQUESTS);
     } catch (e) {
@@ -335,7 +337,7 @@ export class MessagingService {
     if (adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
     }
-    await this.assertWithinLimits(adapter, tenantId, conversationId);
+    await this.assertWithinLimits(adapter, tenantId, conversationId, conv.contact.isGroup);
 
     const token = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
     const filename = kind === 'document' ? file.originalname : undefined;

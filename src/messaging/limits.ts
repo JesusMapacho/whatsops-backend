@@ -53,10 +53,14 @@ export function checkLimits(
   counts: LimitCounts,
   cfg: LimitConfig,
   plan: string,
+  opts: { isGroup?: boolean } = {},
 ): LimitVerdict {
   if (plan !== 'free') return { allowed: true };
 
-  if (counts.contactLastHour >= cfg.maxPerContactHour) {
+  // El ritmo por contacto protege de parecer spam ante UNA persona. En un grupo no
+  // aplica: 4 mensajes/hora haría inusable cualquier grupo con algo de actividad.
+  // El cupo diario sí sigue vigente, que es el que protege la reputación del número.
+  if (!opts.isGroup && counts.contactLastHour >= cfg.maxPerContactHour) {
     return {
       allowed: false,
       message:
