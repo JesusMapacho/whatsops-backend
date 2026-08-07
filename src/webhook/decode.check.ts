@@ -121,11 +121,13 @@ assert.strictEqual(wText[0].messages[0].contactName, 'Ana');
 // Normalizado a la forma de Meta para que la bandeja lo pinte sin cambios.
 assert.strictEqual((wText[0].messages[0].payload as any).text.body, 'hola');
 
-// Eco de lo que enviamos nosotros: no se reingesta.
+// Un `fromMe` ya NO se descarta (feature 28): entra como saliente. La duplicación
+// de nuestros propios envíos por API la corta el dedupe por (tenantId, wamid).
 const wEcho = decodeWebhook(
   wahaEnvelope('message', { id: 'x', from: '521555@c.us', fromMe: true, body: 'mío' }),
 );
-assert.deepStrictEqual(wEcho[0].messages, []);
+assert.strictEqual(wEcho[0].messages.length, 1);
+assert.strictEqual(wEcho[0].messages[0].direction, 'out');
 
 // Grupos, canales y difusión se descartan: llenarían la bandeja de basura.
 for (const from of ['12312312@g.us', 'status@broadcast', '99999@newsletter']) {
@@ -167,18 +169,79 @@ assert.strictEqual((lidReal[0].messages[0].payload as any).text.body, 'No te ent
 // El engine NOWEB pone el nombre en `_data.pushName`, no en `notifyName`.
 assert.strictEqual(lidReal[0].messages[0].contactName, 'Dieand');
 
+// El teléfono real sale de `_data.key.remoteJidAlt` (con LID el id no es un número).
+assert.strictEqual(lidReal[0].messages[0].phone, '5218715172350');
+// Un entrante NO lleva direction: el processor lo trata como 'in' por defecto.
+assert.ok(!('direction' in lidReal[0].messages[0]), 'direction debe OMITIRSE en entrantes');
+
+// --- message.any: el eco de lo que el DUEÑO manda desde su propio teléfono ---
+// Forma real del engine NOWEB: `to` llega VACÍO, así que el chat hay que sacarlo
+// de `_data.key.remoteJid`. Si se confiara en `to`, el eco se perdería.
+const echo = decodeWebhook(
+  wahaEnvelope('message.any', {
+    id: 'true_175647100039313@lid_BBB',
+    from: '5215550000@c.us', // el propio número emparejado, NO el interlocutor
+    fromMe: true,
+    to: '',
+    body: 'te confirmo por aquí',
+    hasMedia: false,
+    ack: 2,
+    _data: {
+      pushName: 'Angel Alarcon', // el nombre del DUEÑO: no debe pisar el del contacto
+      key: { fromMe: true, remoteJid: '175647100039313@lid', addressingMode: 'lid' },
+    },
+  }),
+);
+assert.strictEqual(echo[0].messages.length, 1, 'el eco propio debe entrar');
+assert.strictEqual(echo[0].messages[0].direction, 'out');
+assert.strictEqual(echo[0].messages[0].from, '175647100039313@lid', 'el chat sale de remoteJid');
+assert.strictEqual((echo[0].messages[0].payload as any).viaDevice, true);
+assert.strictEqual((echo[0].messages[0].payload as any).text.body, 'te confirmo por aquí');
+// El estado inicial sale del ack (2 = entregado), no de un 'sent' fijo.
+assert.strictEqual(echo[0].messages[0].status, 'delivered');
+// El pushName de un eco es el del dueño: no se usa como nombre del contacto.
+assert.strictEqual(echo[0].messages[0].contactName, null);
+
+// Un entrante por `message.any` se decodifica igual que por `message`.
+const anyIn = wahaEnvelope('message.any', {
+  id: 'in1',
+  from: '521555@c.us',
+  fromMe: false,
+  body: 'hola',
+  _data: { pushName: 'Ana' },
+});
+assert.strictEqual(decodeWebhook(anyIn)[0].messages.length, 1);
+assert.strictEqual(decodeWebhook(anyIn)[0].messages[0].contactName, 'Ana');
+assert.ok(!('viaDevice' in (decodeWebhook(anyIn)[0].messages[0].payload as any)));
+assert.ok(!('direction' in decodeWebhook(anyIn)[0].messages[0]));
+
+// Un eco hacia un grupo/canal se sigue descartando.
+assert.deepStrictEqual(
+  decodeWebhook(
+    wahaEnvelope('message.any', {
+      id: 'g',
+      fromMe: true,
+      body: 'x',
+      _data: { key: { remoteJid: '123@g.us' } },
+    }),
+  )[0].messages,
+  [],
+);
+
 // `@s.whatsapp.net` también es un chat directo.
 assert.strictEqual(
   decodeWebhook(wahaEnvelope('message', { id: 'w1', from: '521871@s.whatsapp.net', body: 'x' }))[0]
     .messages.length,
   1,
 );
-// Un eco propio se sigue descartando aunque venga con LID.
-assert.deepStrictEqual(
-  decodeWebhook(wahaEnvelope('message', { id: 'e', from: '111@lid', fromMe: true, body: 'x' }))[0]
-    .messages,
-  [],
+// Un eco con LID también entra, y el chat sale de `from` cuando no hay
+// `_data.key.remoteJid` ni `to`.
+const lidEcho = decodeWebhook(
+  wahaEnvelope('message', { id: 'e', from: '111@lid', fromMe: true, body: 'x' }),
 );
+assert.strictEqual(lidEcho[0].messages.length, 1);
+assert.strictEqual(lidEcho[0].messages[0].from, '111@lid');
+assert.strictEqual(lidEcho[0].messages[0].direction, 'out');
 
 // Media entrante: el tipo sale del mime.
 const wImg = decodeWebhook(

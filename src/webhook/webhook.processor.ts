@@ -85,6 +85,10 @@ export class WebhookProcessor extends WorkerHost {
     const tenantId = conn.tenantId;
     // Un mensaje puede llegar como saliente: el eco de lo que el dueño manda desde
     // su propio teléfono (evento message.any de WAHA).
+    //
+    // ponytail: hoy nada auto-responde, así que no hay bucle posible. El día que
+    // exista (chatbot v3, asistente), su disparador TIENE que cortar con
+    // `if (direction === 'out') return` o se realimentará con su propio eco.
     const direction = msg.direction ?? 'in';
     // Idempotencia por (tenant, wamid) — no global: el id de un mensaje de grupo lo
     // genera el remitente y es el mismo para todos los destinatarios.

@@ -10,6 +10,11 @@
 // traduce a "vuelve a emparejar" y el gauge lo cuenta aparte.
 export const MISSING = 'MISSING';
 
+// La sesión existe pero murió y un reinicio NO la recuperó: el estado de auth ya
+// no sirve (número desvinculado desde el teléfono, credenciales invalidadas por
+// otra sesión con el mismo número…). Solo lo arregla volver a escanear el QR.
+export const NEEDS_PAIRING = 'NEEDS_PAIRING';
+
 export type ReconcileAction =
   | { kind: 'none' }
   // Actualizar el status de la fila al real de la instancia.
@@ -43,7 +48,18 @@ export function decideForConnection(conn: ConnState, remote: string | null): Rec
     return conn.status === MISSING ? { kind: 'none' } : { kind: 'update', status: MISSING };
   }
 
-  if (DEAD.has(remote)) return { kind: 'restart', status: remote };
+  if (DEAD.has(remote)) {
+    // UN solo reinicio por episodio de caída. La primera vez que la vemos muerta
+    // se reinicia y se anota el estado; si en la pasada siguiente SIGUE muerta, el
+    // reinicio no sirvió y hay que re-emparejar.
+    //
+    // Reintentar sin tope no arreglaría nada y martillearía la reconexión contra
+    // los servidores de WhatsApp cada pasada, que es justo el patrón por el que
+    // marcan un número — lo contrario de lo que protege esta feature.
+    if (conn.status === NEEDS_PAIRING) return { kind: 'none' };
+    if (DEAD.has(conn.status)) return { kind: 'update', status: NEEDS_PAIRING };
+    return { kind: 'restart', status: remote };
+  }
 
   return remote === conn.status ? { kind: 'none' } : { kind: 'update', status: remote };
 }

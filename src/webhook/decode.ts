@@ -145,6 +145,56 @@ function isDirectChat(from: string): boolean {
   return !!from && !NOT_DIRECT.some((s) => from.endsWith(s));
 }
 
+// Un mensaje de WAHA (entrante o eco propio) → forma interna. `null` si no
+// aporta: sin id, o de un chat que no es 1-a-1.
+function decodeWahaMessage(payload: any): InboundMessage | null {
+  const key = payload._data?.key ?? {};
+  // Para un eco propio, `from` NO es el interlocutor. `_data.key.remoteJid` es
+  // siempre el chat; `to` es el respaldo (en el engine NOWEB llega como '', que
+  // es falsy, así que el orden importa de verdad).
+  const chat: string = payload.fromMe
+    ? key.remoteJid || payload.to || payload.from || ''
+    : payload.from || '';
+  if (!payload.id || !isDirectChat(chat)) return null;
+
+  const mime: string | undefined = payload.media?.mimetype;
+  const type = payload.hasMedia && mime ? kindForMime(mime) : 'text';
+  // Con LID addressing el chat no es un número; el teléfono real viene aparte.
+  const phone = digitsOf(key.remoteJidAlt);
+
+  return {
+    wamid: payload.id,
+    from: chat,
+    type,
+    payload: {
+      ...payload,
+      // Normalizamos el texto a la forma de Meta (`text.body`) para que el hilo
+      // de la bandeja lo pinte sin cambios en el frontend.
+      text: { body: payload.body ?? '' },
+      // Marca el eco para el badge de la burbuja y —importante— para excluirlo
+      // del ritmo por contacto (ver limits.ts).
+      ...(payload.fromMe ? { viaDevice: true } : {}),
+    },
+    // El engine NOWEB lo manda como `_data.pushName`; otros como `notifyName`.
+    // Sin esto el contacto queda sin nombre y el agente solo ve un id (que con
+    // LID no es ni un teléfono). En un eco el pushName es el del DUEÑO, no el
+    // del interlocutor: no se usa.
+    contactName: payload.fromMe
+      ? null
+      : (payload._data?.pushName ?? payload._data?.notifyName ?? payload.notifyName ?? null),
+    ...(payload.fromMe ? { direction: 'out' as const } : {}),
+    ...(payload.fromMe ? { status: ACK_STATUS[Number(payload.ack)] ?? 'sent' } : {}),
+    ...(phone ? { phone } : {}),
+  };
+}
+
+// '5218715172350@s.whatsapp.net' → '5218715172350'. Vacío si no hay dígitos.
+function digitsOf(jid: unknown): string | undefined {
+  if (typeof jid !== 'string') return undefined;
+  const d = jid.split('@')[0].replace(/\D/g, '');
+  return d || undefined;
+}
+
 // --- WAHA: { event, session, payload } (envelope propio, no de Meta) ---
 // Un solo cambio por POST: WAHA manda un evento por request.
 function decodeWaha(p: any): NormalizedChange[] {
@@ -152,39 +202,14 @@ function decodeWaha(p: any): NormalizedChange[] {
   const payload = p.payload ?? {};
 
   switch (p.event) {
-    case 'message': {
-      const from = typeof payload.from === 'string' ? payload.from : '';
-      // Descartar el eco de lo que enviamos nosotros y lo que no sea un chat
-      // 1-a-1 (grupos, canales y difusión llenarían la bandeja de basura).
-      if (payload.fromMe || !isDirectChat(from) || !payload.id) {
-        return [{ ...base, messages: [], statuses: [] }];
-      }
-      const mime: string | undefined = payload.media?.mimetype;
-      const type = payload.hasMedia && mime ? kindForMime(mime) : 'text';
-      return [
-        {
-          ...base,
-          messages: [
-            {
-              wamid: payload.id,
-              from,
-              type,
-              // Normalizamos el texto a la forma de Meta (`text.body`) para que
-              // el hilo de la bandeja lo pinte sin cambios en el frontend.
-              payload: { ...payload, text: { body: payload.body ?? '' } },
-              // El engine NOWEB lo manda como `_data.pushName`; otros como
-              // `notifyName`. Sin esto el contacto queda sin nombre y el agente
-              // solo ve un id (que con LID no es ni un teléfono).
-              contactName:
-                payload._data?.pushName ??
-                payload._data?.notifyName ??
-                payload.notifyName ??
-                null,
-            },
-          ],
-          statuses: [],
-        },
-      ];
+    // `message` = solo entrantes. `message.any` = además lo que el DUEÑO manda
+    // desde su propio teléfono, que es como la bandeja se entera de esas
+    // respuestas (si no, el agente ve una conversación "sin contestar" que ya se
+    // contestó desde el celular). Ambos comparten forma de payload.
+    case 'message':
+    case 'message.any': {
+      const msg = decodeWahaMessage(payload);
+      return [{ ...base, messages: msg ? [msg] : [], statuses: [] }];
     }
     case 'message.ack': {
       const status = ACK_STATUS[Number(payload.ack)];

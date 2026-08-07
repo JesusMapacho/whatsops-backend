@@ -35,9 +35,13 @@ export const HOUR_MS = 60 * 60 * 1000;
 export const DAY_MS = 24 * HOUR_MS;
 
 export interface LimitCounts {
-  // Salientes a este contacto en la última hora.
+  // Salientes a este contacto en la última hora, EXCLUYENDO los que el dueño
+  // mandó desde su propio teléfono: si contaran, cuatro respuestas rápidas desde
+  // el celular dejarían al agente bloqueado con un 429 en la bandeja.
   contactLastHour: number;
-  // Salientes del tenant en las últimas 24 h.
+  // Salientes del tenant en las últimas 24 h, incluyendo los del teléfono:
+  // consumen la reputación del número igual, y ese es el recurso que protege el
+  // cupo diario.
   tenantLastDay: number;
 }
 

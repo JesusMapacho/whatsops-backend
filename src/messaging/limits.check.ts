@@ -43,4 +43,15 @@ assert.deepStrictEqual(limitsFromEnv(() => '0'), DEFAULT_LIMITS);
 // El default del ritmo es el de la guía de WAHA.
 assert.strictEqual(DEFAULT_LIMITS.maxPerContactHour, 4);
 
+// --- El eco del teléfono no debe bloquear al agente ---
+// `contactLastHour` llega ya SIN los mensajes marcados viaDevice (lo filtra la
+// query). Con 4 respuestas del dueño desde el celular, el agente sigue pudiendo
+// enviar; lo que se agota es el cupo diario, que sí las cuenta.
+assert.ok(
+  checkLimits({ contactLastHour: 0, tenantLastDay: 4 }, cfg, 'free').allowed,
+  '4 mensajes del teléfono no deben bloquear al agente',
+);
+// Pero el cupo diario sí los ve y corta al llegar al tope.
+assert.ok(!checkLimits({ contactLastHour: 0, tenantLastDay: 200 }, cfg, 'free').allowed);
+
 console.log('limits.check OK');

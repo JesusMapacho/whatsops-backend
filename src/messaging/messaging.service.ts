@@ -172,6 +172,10 @@ export class MessagingService {
             conversationId,
             direction: 'out',
             createdAt: { gt: new Date(now - HOUR_MS) },
+            // El eco de lo que el dueño manda desde su teléfono NO cuenta para el
+            // ritmo por contacto: si contara, cuatro respuestas rápidas desde el
+            // celular bloquearían al agente con un 429.
+            NOT: { payload: { path: ['viaDevice'], equals: true } },
           },
         }),
         this.prisma.message.count({

@@ -6,6 +6,7 @@ import {
   orphanSessions,
   webhookNeedsUpdate,
   MISSING,
+  NEEDS_PAIRING,
 } from './waha.reconcile';
 
 const ok = (status: string) => ({ status, tenantSuspended: false });
@@ -34,10 +35,36 @@ assert.deepStrictEqual(decideForConnection(ok('WORKING'), 'STOPPED'), {
   kind: 'restart',
   status: 'STOPPED',
 });
-// Se reintenta aunque la fila ya diga FAILED: el objetivo es que vuelva a vivir.
+// UN solo reinicio por episodio. Si la fila YA dice muerta, el reinicio anterior
+// no sirvió → se escala a NEEDS_PAIRING en vez de reintentar para siempre.
+// Reintentar sin tope martillearía la reconexión contra WhatsApp cada pasada, que
+// es justo el patrón por el que marcan un número (bug real observado en local:
+// reiniciaba cada 2 min indefinidamente sin recuperar la sesión).
 assert.deepStrictEqual(decideForConnection(ok('FAILED'), 'FAILED'), {
-  kind: 'restart',
-  status: 'FAILED',
+  kind: 'update',
+  status: NEEDS_PAIRING,
+});
+assert.deepStrictEqual(decideForConnection(ok('STOPPED'), 'STOPPED'), {
+  kind: 'update',
+  status: NEEDS_PAIRING,
+});
+// Cruzado: murió de una forma y sigue muerta de otra → tampoco se reintenta.
+assert.deepStrictEqual(decideForConnection(ok('FAILED'), 'STOPPED'), {
+  kind: 'update',
+  status: NEEDS_PAIRING,
+});
+// Y una vez escalada, no se vuelve a tocar: nada de escribir en cada pasada.
+assert.deepStrictEqual(decideForConnection(ok(NEEDS_PAIRING), 'FAILED'), { kind: 'none' });
+assert.deepStrictEqual(decideForConnection(ok(NEEDS_PAIRING), 'STOPPED'), { kind: 'none' });
+// Pero si revive por su cuenta, la fila se pone al día (no queda pegada).
+assert.deepStrictEqual(decideForConnection(ok(NEEDS_PAIRING), 'WORKING'), {
+  kind: 'update',
+  status: 'WORKING',
+});
+// Un tenant suspendido sigue teniendo prioridad sobre todo lo anterior.
+assert.deepStrictEqual(decideForConnection(susp(NEEDS_PAIRING), 'FAILED'), {
+  kind: 'delete',
+  reason: 'suspended',
 });
 
 // --- La sesión ya no existe en la instancia: marcar, NO recrear ---
