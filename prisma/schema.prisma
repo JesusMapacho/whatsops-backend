@@ -354,6 +354,12 @@ model WebhookEvent {
 }
 
 model Template {
+  // Componentes CRUDOS de Meta. Se guardan enteros y NO como "número de variables"
+  // porque el cuerpo de envío hay que RECONSTRUIRLO con la misma forma, y una
+  // cabecera puede ser texto, imagen o documento — cosas que un contador no
+  // distingue. Los parámetros se derivan al LEER (una columna derivada se quedaría
+  // vieja tras un sync).
+  components Json?
   id        String   @id @default(cuid())
   tenantId  String
   name      String

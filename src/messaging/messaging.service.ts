@@ -23,6 +23,11 @@ import {
   withMediaUrl,
 } from './media.util';
 import { channelAdapter, ChannelAdapter } from './channels';
+import {
+  buildTemplateComponents,
+  templateParams,
+  unsupportedTemplateReason,
+} from './template-params';
 import { checkLimits, DAY_MS, HOUR_MS, isCold, LimitConfig, limitsFromEnv } from './limits';
 import { StorageService } from '../storage/storage.service';
 import { fetchChatPictureUrl, sendReaction, sendSeen, setTyping } from '../waha/waha.client';
@@ -83,6 +88,9 @@ export class MessagingService {
     if (dto.type === 'template' && !adapter.supportsTemplate) {
       throw new BadRequestException('Este canal no soporta plantillas de Meta.');
     }
+    // La plantilla se resuelve en el SERVIDOR: así se comprueba de paso que sigue
+    // aprobada y que los valores cuadran, antes de gastar un envío.
+    if (dto.type === 'template') dto.components = await this.templateComponents(tenantId, dto);
     // La ventana de 24 h es regla de Meta: WAHA (WhatsApp Web) no la tiene.
     if (dto.type === 'text' && adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
@@ -130,6 +138,40 @@ export class MessagingService {
     });
     this.events.emitToTenant(tenantId, 'message:new', message);
     return message;
+  }
+
+  // Construye el `components` de la Cloud API a partir de los valores del operador.
+  // `undefined` cuando la plantilla no lleva variables, para que el cuerpo omita la
+  // clave (Meta la rechaza vacía).
+  private async templateComponents(
+    tenantId: string,
+    dto: { name: string; language: string; params?: string[] },
+  ): Promise<unknown[] | undefined> {
+    const tpl = await this.prisma.template.findUnique({
+      where: {
+        tenantId_name_language: { tenantId, name: dto.name, language: dto.language },
+      },
+    });
+    if (!tpl) throw new BadRequestException('Esa plantilla no existe. Sincroniza las plantillas.');
+    // Meta puede haberla desaprobado desde el último sync; enviarla sería un 132xxx.
+    if (tpl.status !== 'APPROVED') {
+      throw new BadRequestException(`La plantilla "${tpl.name}" ya no está aprobada por Meta.`);
+    }
+    const reason = unsupportedTemplateReason(tpl.components);
+    if (reason) throw new BadRequestException(reason);
+
+    const params = templateParams(tpl.components);
+    const values = dto.params ?? [];
+    if (params.length !== values.length) {
+      throw new BadRequestException(
+        `La plantilla "${tpl.name}" necesita ${params.length} valores y se recibieron ${values.length}.`,
+      );
+    }
+    if (values.some((v) => !v.trim())) {
+      throw new BadRequestException('Ninguna variable de la plantilla puede ir vacía.');
+    }
+    const built = buildTemplateComponents(params, values);
+    return built.length ? built : undefined;
   }
 
   // Guarda un saliente tolerando que el eco del proveedor (message.any) haya
@@ -538,6 +580,8 @@ export class MessagingService {
           category: t.category ?? null,
           status: t.status ?? null,
           body: templateBody(t.components),
+          // Crudo: es lo que permite reconstruir el cuerpo de envío con variables.
+          components: t.components ?? null,
         };
         await this.prisma.template.upsert({
           where: {
@@ -552,11 +596,19 @@ export class MessagingService {
     return { synced };
   }
 
-  listTemplates(tenantId: string) {
-    return this.prisma.template.findMany({
+  async listTemplates(tenantId: string) {
+    const rows = await this.prisma.template.findMany({
       where: { tenantId, status: 'APPROVED' },
       orderBy: { name: 'asc' },
     });
+    // Los parámetros se derivan al LEER y no se guardan: `components` es la fuente
+    // de verdad y una columna derivada se quedaría vieja tras un sync. La forma cruda
+    // de Meta no sale de aquí: al navegador solo le llega la lista de parámetros.
+    return rows.map(({ components, ...t }) => ({
+      ...t,
+      params: templateParams(components),
+      unsupported: unsupportedTemplateReason(components),
+    }));
   }
 }
 
@@ -566,11 +618,14 @@ function parseSendDto(body: any): SendDto {
   const replyTo =
     typeof body?.replyTo === 'string' && body.replyTo.trim() ? body.replyTo.trim() : undefined;
   if (body?.type === 'template') {
+    // `components` NO se acepta del cliente: la construye el servidor a partir de
+    // `params`. Se ignora en silencio y no se lanza, para no romper a un cliente
+    // viejo que todavía la mande.
     return {
       type: 'template',
       name: str(body?.name, 'name'),
       language: str(body?.language, 'language'),
-      components: Array.isArray(body?.components) ? body.components : undefined,
+      params: Array.isArray(body?.params) ? body.params.map((v: unknown) => String(v ?? '')) : [],
       ...(replyTo ? { replyTo } : {}),
     };
   }

@@ -4,9 +4,21 @@
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // `replyTo` = wamid del mensaje citado. Opcional y transversal a los dos tipos.
+//
+// `params` son los VALORES que teclea el operador, en el orden de `templateParams`.
+// `components` (la forma de Meta) la construye el SERVIDOR a partir de ellos y no se
+// acepta del cliente: aceptarla dejaba que el navegador definiera el cuerpo del envío
+// —y que un cliente viejo mandara una forma inválida a 500 destinatarios de golpe.
 export type SendDto =
   | { type: 'text'; text: string; replyTo?: string }
-  | { type: 'template'; name: string; language: string; components?: unknown[]; replyTo?: string };
+  | {
+      type: 'template';
+      name: string;
+      language: string;
+      params?: string[];
+      components?: unknown[];
+      replyTo?: string;
+    };
 
 // Dentro de la ventana de servicio si el último entrante fue hace < 24 h.
 export function isWithinWindow(

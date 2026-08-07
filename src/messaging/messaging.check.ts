@@ -55,6 +55,47 @@ assert.deepStrictEqual(
   { template: { name: 'x', language: { code: 'es' }, components: [{ type: 'BODY' }] } },
 );
 
+// --- La cita, y que el `components` construido llegue al cuerpo de Meta ---
+assert.deepStrictEqual(
+  (buildMessagePayload('521555', { type: 'text', text: 'x', replyTo: 'W1' }) as any).context,
+  { message_id: 'W1' },
+);
+// Sin variables NO debe aparecer la clave `components`: Meta la rechaza vacía.
+const sinVars = buildMessagePayload('521555', {
+  type: 'template',
+  name: 'aviso',
+  language: 'es',
+}) as any;
+assert.ok(!('components' in sinVars.template));
+// Con variables, se pasa tal cual la construyó el servidor.
+const conVars = buildMessagePayload('521555', {
+  type: 'template',
+  name: 'pedido',
+  language: 'es',
+  components: [{ type: 'body', parameters: [{ type: 'text', text: 'Ana' }] }],
+}) as any;
+assert.deepStrictEqual(conVars.template.components, [
+  { type: 'body', parameters: [{ type: 'text', text: 'Ana' }] },
+]);
+
+// El payload PERSISTIDO de una plantilla conserva las variables, para que el hilo
+// muestre lo que de verdad se envió.
+assert.deepStrictEqual(
+  storedTextPayload({
+    type: 'template',
+    name: 'pedido',
+    language: 'es',
+    components: [{ type: 'body', parameters: [{ type: 'text', text: 'Ana' }] }],
+  } as any),
+  {
+    template: {
+      name: 'pedido',
+      language: { code: 'es' },
+      components: [{ type: 'body', parameters: [{ type: 'text', text: 'Ana' }] }],
+    },
+  },
+);
+
 // --- Mapeo de errores ---
 assert.match(mapGraphError({ error: { code: 190 } }), /Token/);
 assert.match(mapGraphError({ error: { code: 132001 } }), /Plantilla/);
