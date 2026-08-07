@@ -35,7 +35,10 @@ const DEFAULT_EVENT_RETENTION_DAYS = 14;
 // Importación de historial: tamaño de página, pausa entre páginas y tope de páginas.
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_PAUSE_MS = 800;
-const DEFAULT_HISTORY_PAGES = 4; // 200 mensajes por conversación
+const DEFAULT_HISTORY_PAGES = 4; // 200 mensajes NUEVOS por pulsada
+// Tope de páginas RECORRIDAS (no importadas): al pulsar por segunda vez hay que
+// pasar por encima de lo ya importado antes de encontrar historial nuevo.
+const HISTORY_MAX_SCAN_PAGES = 40;
 
 @Injectable()
 export class WahaService implements OnModuleInit {
@@ -130,7 +133,13 @@ export class WahaService implements OnModuleInit {
 
     let imported = 0;
     let offset = 0;
-    for (let page = 0; page < this.historyPages; page++) {
+    let productive = 0;
+    let scanned = 0;
+    // WAHA devuelve el chat de más nuevo a más viejo desde offset 0, así que en la
+    // SEGUNDA pulsada las primeras páginas son todas cosas que ya tenemos. Esas se
+    // saltan SIN gastar presupuesto: si contaran, el botón solo funcionaría una vez
+    // (bug observado en uso real). `scanned` acota el barrido total.
+    while (productive < this.historyPages && scanned < HISTORY_MAX_SCAN_PAGES) {
       const raw = await fetchChatMessages(
         baseUrl,
         apiKey,
@@ -139,10 +148,12 @@ export class WahaService implements OnModuleInit {
         HISTORY_PAGE_SIZE,
         offset,
       );
+      scanned++;
       if (!raw.length) break;
       offset += raw.length;
 
       const rows = usableHistory(raw.map(toHistoryRow), oldest?.createdAt ?? null);
+      if (rows.length) productive++;
       for (const r of rows) {
         // Idempotente por (tenant, wamid): repetir la importación no duplica.
         try {
@@ -163,17 +174,22 @@ export class WahaService implements OnModuleInit {
           if (e?.code !== 'P2002') throw e; // ya estaba: seguir
         }
       }
-      if (raw.length < HISTORY_PAGE_SIZE) break;
+      if (raw.length < HISTORY_PAGE_SIZE) break; // fin del historial en la instancia
       // Serial y con pausa: la instancia tiene reputación compartida entre tenants,
       // y ráfagas de llamadas se rate-limitean o se marcan.
       await new Promise((r) => setTimeout(r, HISTORY_PAUSE_MS));
     }
 
-    if (offset >= this.historyPages * HISTORY_PAGE_SIZE) {
-      // Nada de topes silenciosos: si se truncó, se dice.
+    // Nada de topes silenciosos: si se cortó por presupuesto, se dice.
+    if (productive >= this.historyPages) {
       this.logger.log(
-        `Historial truncado en ${offset} mensajes para la conversación ${conversationId} ` +
-          `(tope de ${this.historyPages} páginas).`,
+        `Historial truncado: ${imported} mensajes importados en ${conversationId} ` +
+          `(tope de ${this.historyPages} páginas). Vuelve a pulsar para traer más.`,
+      );
+    } else if (scanned >= HISTORY_MAX_SCAN_PAGES) {
+      this.logger.warn(
+        `Barrido de historial agotado en ${conversationId} tras ${scanned} páginas ` +
+          `sin llegar al tope de importación.`,
       );
     }
     // UN solo evento al final, no uno por mensaje: son cientos.

@@ -2,7 +2,37 @@
 // Correr: npx ts-node src/waha/waha.url.check.ts
 // Sin red: los casos válidos usan IP literales, así que no se resuelve DNS.
 import * as assert from 'node:assert';
-import { assertSafeBaseUrl, assertSafeFetchUrl, isPrivateIp, sameOrigin } from './waha.url';
+import {
+  assertSafeBaseUrl,
+  assertSafeFetchUrl,
+  isPrivateIp,
+  sameOrigin,
+  wahaMediaUrl,
+} from './waha.url';
+
+// --- Reescritura de la URL de media ---
+// WAHA genera la URL con SU vista de si misma (dentro del contenedor,
+// `localhost:3000`), que no es la base con la que nosotros la alcanzamos
+// (`127.0.0.1:3002`). Comparar origenes rechazaba media legitima (bug observado:
+// toda imagen y sticker entrante llegaba con error). Se conserva solo la ruta.
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/files/abc.jpg', 'http://127.0.0.1:3002'),
+  'http://127.0.0.1:3002/api/files/abc.jpg',
+);
+// La query se conserva (WAHA puede firmar la descarga por ahí).
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/files/a.jpg?x-api-key=k', 'http://127.0.0.1:3002'),
+  'http://127.0.0.1:3002/api/files/a.jpg?x-api-key=k',
+);
+// El host del payload NUNCA se honra: aunque apunte a metadata de la nube, la
+// petición sale contra NUESTRA base. Ahí está la propiedad de seguridad.
+assert.strictEqual(
+  wahaMediaUrl('http://169.254.169.254/latest/meta-data/', 'http://127.0.0.1:3002'),
+  'http://127.0.0.1:3002/latest/meta-data/',
+);
+// Sin base o con URL basura no se inventa nada.
+assert.strictEqual(wahaMediaUrl('http://x/y', ''), null);
+assert.strictEqual(wahaMediaUrl('no-es-url', 'http://127.0.0.1:3002'), null);
 
 // --- ¿A quién se le adjunta la api key? ---
 // Las URLs de media vienen DENTRO del payload, o sea que las controla quien opera la

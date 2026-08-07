@@ -71,6 +71,27 @@ export async function assertSafeBaseUrl(raw: string): Promise<string> {
   return `${u.protocol}//${u.host}`;
 }
 
+// Reescribe una URL de media de WAHA sobre NUESTRA base conocida, conservando solo
+// la ruta y la query.
+//
+// Por qué: WAHA genera la URL con su propia vista de sí mismo (dentro del
+// contenedor, `localhost:3000`), que no coincide con el `baseUrl` con el que
+// nosotros la alcanzamos (`127.0.0.1:3002`). Comparar orígenes rechazaba media
+// legítima; y confiar en el host del payload es justo el agujero que hay que evitar.
+//
+// Tomando solo la ruta se consiguen las dos cosas: funciona, y el host del payload
+// deja de importar — nunca seguimos a donde nos diga un tercero.
+export function wahaMediaUrl(payloadUrl: string, baseUrl: string): string | null {
+  if (!baseUrl) return null;
+  try {
+    const u = new URL(payloadUrl);
+    const base = new URL(baseUrl);
+    return `${base.origin}${u.pathname}${u.search}`;
+  } catch {
+    return null;
+  }
+}
+
 // Tope de un binario descargado de una URL del payload. Coincide con el límite de
 // documento de la Cloud API; lo que exceda no lo íbamos a poder reenviar igual.
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;

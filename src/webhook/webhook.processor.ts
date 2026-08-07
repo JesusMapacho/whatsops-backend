@@ -10,7 +10,7 @@ import { StorageService } from '../storage/storage.service';
 import { downloadFromGraph, withMediaUrl, MediaKind } from '../messaging/media.util';
 import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './decode';
 import { applyReaction } from './mutations';
-import { fetchPayloadBinary } from '../waha/waha.url';
+import { fetchPayloadBinary, wahaMediaUrl } from '../waha/waha.url';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -220,17 +220,29 @@ export class WebhookProcessor extends WorkerHost {
     if (conn.platform === 'waha') {
       const raw = msg.payload as any;
       const media = raw?.media ?? {};
-      if (!media.url) return { kind, error: true };
+      // WAHA puede fallar al bajar el archivo de la CDN de WhatsApp (una URL
+      // cifrada que caduca): manda `url: null` y su propio error. No es un fallo
+      // nuestro y no tiene arreglo, así que se distingue para poder decirlo.
+      if (!media.url) {
+        return {
+          kind,
+          mimeType: media.mimetype ?? null,
+          error: true,
+          ...(media.error ? { reason: 'provider' } : {}),
+        };
+      }
       // El caption de WAHA viene en `body`, no dentro de `media`.
       const caption: string | undefined = raw?.body || undefined;
       const filename: string | undefined = media.filename ?? undefined;
       try {
-        // La URL viene DENTRO del payload, o sea que la controla quien opera la
-        // instancia (con BYO, el tenant). fetchPayloadBinary adjunta la api key solo
-        // si es el mismo origen que la instancia, bloquea las que apuntan hacia
-        // dentro de la red, y acota el tamaño de la descarga.
+        // El host de la URL del payload NO se usa: se conserva solo la ruta y se
+        // pega a la base con la que nosotros alcanzamos la instancia. WAHA la genera
+        // con su vista interna (`localhost:3000`), que no coincide con la nuestra, y
+        // además así nunca seguimos a un host que elija un tercero.
+        const url = wahaMediaUrl(media.url, this.baseUrlOf(conn));
+        if (!url) return { kind, error: true };
         const { buffer, mime: fetched } = await fetchPayloadBinary(
-          media.url,
+          url,
           this.baseUrlOf(conn),
           this.crypto.decrypt(conn.accessTokenEnc),
         );
