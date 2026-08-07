@@ -2,7 +2,22 @@
 // Correr: npx ts-node src/waha/waha.url.check.ts
 // Sin red: los casos válidos usan IP literales, así que no se resuelve DNS.
 import * as assert from 'node:assert';
-import { assertSafeBaseUrl, isPrivateIp } from './waha.url';
+import { assertSafeBaseUrl, assertSafeFetchUrl, isPrivateIp, sameOrigin } from './waha.url';
+
+// --- ¿A quién se le adjunta la api key? ---
+// Las URLs de media vienen DENTRO del payload, o sea que las controla quien opera la
+// instancia (con BYO, el tenant). La key solo puede viajar al mismo origen.
+assert.ok(sameOrigin('http://waha:3000/api/files/x.jpg', 'http://waha:3000'));
+assert.ok(sameOrigin('http://waha:3000/otra/ruta', 'http://waha:3000/'));
+// Puerto, esquema o host distintos = otro origen.
+assert.ok(!sameOrigin('http://waha:3001/x', 'http://waha:3000'));
+assert.ok(!sameOrigin('https://waha:3000/x', 'http://waha:3000'));
+assert.ok(!sameOrigin('http://otro:3000/x', 'http://waha:3000'));
+// El caso que importa: una CDN de WhatsApp NO es el mismo origen.
+assert.ok(!sameOrigin('https://pps.whatsapp.net/foto.jpg', 'http://waha:3000'));
+// Y el clásico de SSRF tampoco.
+assert.ok(!sameOrigin('http://169.254.169.254/latest/meta-data/', 'http://waha:3000'));
+assert.ok(!sameOrigin('no-es-una-url', 'http://waha:3000'));
 
 // --- Rangos que nunca son una instancia legítima de internet ---
 for (const ip of [
@@ -35,8 +50,13 @@ assert.ok(isPrivateIp('no-una-ip'));
 assert.ok(isPrivateIp('999.1.1.1'));
 
 async function main() {
-  const rejects = (url: string, why: string) =>
-    assert.rejects(() => assertSafeBaseUrl(url), Error, why);
+  // Acepta una URL (para assertSafeBaseUrl) o una promesa ya creada.
+  const rejects = (target: string | Promise<unknown>, why: string) =>
+    assert.rejects(
+      typeof target === 'string' ? () => assertSafeBaseUrl(target) : () => target,
+      Error,
+      why,
+    );
 
   // Esquemas y formas inválidas (se rechazan antes de tocar DNS).
   await rejects('file:///etc/passwd', 'file:// no');
@@ -57,6 +77,36 @@ async function main() {
     await assertSafeBaseUrl('https://8.8.8.8:8443/api/algo'),
     'https://8.8.8.8:8443',
   );
+
+  // --- Descarga de URLs del payload ---
+  // Mismo origen que la instancia: se adjunta la key (es ella sirviendo el binario).
+  assert.deepStrictEqual(
+    await assertSafeFetchUrl('http://waha:3000/api/files/x.jpg', 'http://waha:3000'),
+    { withKey: true },
+  );
+  // Otro origen público (CDN legítima): se descarga SIN credencial.
+  assert.deepStrictEqual(
+    await assertSafeFetchUrl('https://8.8.8.8/foto.jpg', 'http://waha:3000'),
+    { withKey: false },
+  );
+  // Otro origen apuntando hacia dentro: no se toca. Este es el ataque: adjuntar la
+  // api key a una petición contra metadata de la nube o un servicio interno.
+  await rejects(
+    assertSafeFetchUrl('http://169.254.169.254/latest/meta-data/', 'http://waha:3000') as any,
+    'metadata de la nube',
+  );
+  await rejects(
+    assertSafeFetchUrl('http://127.0.0.1:6379/', 'http://waha:3000') as any,
+    'loopback',
+  );
+  await rejects(
+    assertSafeFetchUrl('http://10.0.0.5/interno', 'http://waha:3000') as any,
+    'red privada',
+  );
+  await rejects(assertSafeFetchUrl('file:///etc/passwd', 'http://waha:3000') as any, 'file://');
+  await rejects(assertSafeFetchUrl('basura', 'http://waha:3000') as any, 'URL inválida');
+  // Sin baseUrl configurado no se puede considerar "mismo origen" a nada.
+  await rejects(assertSafeFetchUrl('http://127.0.0.1/x', '') as any, 'sin baseUrl');
 
   console.log('waha.url.check OK');
 }

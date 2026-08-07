@@ -71,6 +71,98 @@ export async function assertSafeBaseUrl(raw: string): Promise<string> {
   return `${u.protocol}//${u.host}`;
 }
 
+// Tope de un binario descargado de una URL del payload. Coincide con el límite de
+// documento de la Cloud API; lo que exceda no lo íbamos a poder reenviar igual.
+const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+
+// Descarga un binario de una URL del payload, con las dos protecciones que
+// necesita: origen validado (ver assertSafeFetchUrl) y TAMAÑO ACOTADO.
+//
+// El tope importa: `arrayBuffer()` sobre una URL que elige un tercero es una lectura
+// de memoria sin límite dentro del worker — un archivo enorme lo tumba.
+export async function fetchPayloadBinary(
+  url: string,
+  baseUrl: string,
+  apiKey: string,
+): Promise<{ buffer: Buffer; mime: string }> {
+  const { withKey } = await assertSafeFetchUrl(url, baseUrl);
+  const res = await fetch(url, {
+    headers: withKey ? { 'X-Api-Key': apiKey } : {},
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  // Si el servidor declara el tamaño, se rechaza antes de leer un solo byte.
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
+    throw new Error('El adjunto excede el tamaño máximo.');
+  }
+
+  const mime = res.headers.get('content-type') ?? 'application/octet-stream';
+  if (!res.body) throw new Error('Respuesta sin cuerpo.');
+
+  // Lectura por trozos para poder cortar aunque no haya content-length (o mienta).
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = (res.body as any).getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > MAX_DOWNLOAD_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error('El adjunto excede el tamaño máximo.');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return { buffer: Buffer.concat(chunks), mime };
+}
+
+// ¿Se le puede adjuntar la api key a esta URL?
+//
+// Por qué existe: las URLs de media y de foto de perfil vienen DENTRO del payload
+// del webhook o de la respuesta de la instancia, o sea que las controla quien opera
+// esa instancia. Con BYO eso es el tenant. Si se adjuntara la api key a cualquier
+// URL, un tenant podría apuntarla a un endpoint de metadata de la nube o a un
+// servicio interno y recibir la respuesta con una credencial nuestra encima.
+//
+// Regla: la key SOLO viaja al mismo origen que la instancia. Una CDN legítima de
+// WhatsApp (pps.whatsapp.net, mmg.whatsapp.net) es otro origen y no la necesita.
+export function sameOrigin(url: string, baseUrl: string): boolean {
+  try {
+    return new URL(url).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+// Comprueba que una URL del payload es segura de descargar. Devuelve si hay que
+// adjuntar la api key. Lanza si no se debe tocar en absoluto.
+export async function assertSafeFetchUrl(
+  url: string,
+  baseUrl: string,
+): Promise<{ withKey: boolean }> {
+  // Mismo origen que la instancia: es ella misma sirviendo el binario.
+  if (baseUrl && sameOrigin(url, baseUrl)) return { withKey: true };
+
+  // Otro origen: se descarga SIN credencial y solo si no apunta hacia dentro.
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error('URL de media inválida.');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('URL de media con esquema no permitido.');
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  const ips = isIP(host) ? [host] : await resolveAll(host);
+  if (!ips.length) throw new Error('No se pudo resolver el host del media.');
+  if (ips.some(isPrivateIp)) {
+    throw new Error('La URL del media apunta a una dirección interna o reservada.');
+  }
+  return { withKey: false };
+}
+
 async function resolveAll(host: string): Promise<string[]> {
   try {
     const res = await lookup(host, { all: true });

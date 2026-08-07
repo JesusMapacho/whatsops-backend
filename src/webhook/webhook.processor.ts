@@ -10,6 +10,7 @@ import { StorageService } from '../storage/storage.service';
 import { downloadFromGraph, withMediaUrl, MediaKind } from '../messaging/media.util';
 import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './decode';
 import { applyReaction } from './mutations';
+import { fetchPayloadBinary } from '../waha/waha.url';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -23,6 +24,7 @@ const GRAPH_VERSION = 'v22.0';
 export class WebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(WebhookProcessor.name);
   private readonly graphVersion: string;
+  private readonly wahaUrl: string;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -33,6 +35,7 @@ export class WebhookProcessor extends WorkerHost {
   ) {
     super();
     this.graphVersion = config.get<string>('GRAPH_API_VERSION') ?? GRAPH_VERSION;
+    this.wahaUrl = (config.get<string>('WAHA_URL') ?? '').replace(/\/$/, '');
   }
 
   async process(job: Job<{ webhookEventId: string }>) {
@@ -222,12 +225,16 @@ export class WebhookProcessor extends WorkerHost {
       const caption: string | undefined = raw?.body || undefined;
       const filename: string | undefined = media.filename ?? undefined;
       try {
-        const res = await fetch(media.url, {
-          headers: { 'X-Api-Key': this.crypto.decrypt(conn.accessTokenEnc) },
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buffer = Buffer.from(await res.arrayBuffer());
-        const mime = media.mimetype ?? res.headers.get('content-type') ?? 'application/octet-stream';
+        // La URL viene DENTRO del payload, o sea que la controla quien opera la
+        // instancia (con BYO, el tenant). fetchPayloadBinary adjunta la api key solo
+        // si es el mismo origen que la instancia, bloquea las que apuntan hacia
+        // dentro de la red, y acota el tamaño de la descarga.
+        const { buffer, mime: fetched } = await fetchPayloadBinary(
+          media.url,
+          this.baseUrlOf(conn),
+          this.crypto.decrypt(conn.accessTokenEnc),
+        );
+        const mime = media.mimetype ?? fetched;
         const mediaKey = await this.storage.put(buffer, mime, filename);
         return {
           kind,
@@ -340,6 +347,11 @@ export class WebhookProcessor extends WorkerHost {
       'message:updated',
       withMediaUrl(updated, (k) => this.storage.signedUrl(k)),
     );
+  }
+
+  // Instancia WAHA de esta conexión: la propia (BYO) o la gestionada de env.
+  private baseUrlOf(conn: { baseUrl: string | null }): string {
+    return conn.baseUrl ?? this.wahaUrl;
   }
 
   private async handleStatus(tenantId: string, st: StatusUpdate) {
