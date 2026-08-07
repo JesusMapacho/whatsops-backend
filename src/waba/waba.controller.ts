@@ -35,4 +35,11 @@ export class WabaController {
   restart(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.waba.restart(user.tenantId, id);
   }
+
+  // Alternativa al QR: código de 8 dígitos que se teclea en el teléfono.
+  // El código va en la respuesta y no se persiste.
+  @Post(':id/request-code')
+  requestCode(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+    return this.waba.requestCode(user.tenantId, id, body?.phone);
+  }
 }

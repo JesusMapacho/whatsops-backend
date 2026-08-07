@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -55,6 +56,15 @@ export class ConversationsController {
     // Un agente solo envía en conversaciones suyas o abiertas.
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
     return this.messaging.send(user.tenantId, id, body);
+  }
+
+  // Foto de perfil del contacto, en base64. Se cachea en el navegador un día: no
+  // vale la pena volver a pedirla a WhatsApp en cada apertura del hilo.
+  @Get(':id/avatar')
+  @Header('Cache-Control', 'private, max-age=86400')
+  async avatar(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.messaging.contactAvatar(user.tenantId, id);
   }
 
   // Importa los mensajes anteriores al emparejamiento de ESTA conversación.

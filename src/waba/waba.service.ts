@@ -14,6 +14,7 @@ import {
   deleteSession,
   fetchQr,
   ping,
+  requestPairingCode,
   restartSession,
 } from '../waha/waha.client';
 import { assertSafeBaseUrl } from '../waha/waha.url';
@@ -204,6 +205,40 @@ export class WabaService {
         this.crypto.decrypt(conn.accessTokenEnc),
         conn.phoneNumberId,
       );
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  // Emparejamiento por código: en vez de escanear, WhatsApp muestra un código de 8
+  // dígitos que el usuario teclea en su teléfono (Dispositivos vinculados →
+  // Vincular con número).
+  //
+  // El código se DEVUELVE y no se guarda ni se loguea: es una credencial de un solo
+  // uso para vincular un dispositivo, igual de sensible que el QR.
+  async requestCode(tenantId: string, id: string, rawPhone: unknown) {
+    const conn = await this.wahaConn(tenantId, id);
+    // Solo dígitos, sin '+' ni espacios: es lo que espera WAHA.
+    const phone = typeof rawPhone === 'string' ? rawPhone.replace(/\D/g, '') : '';
+    if (phone.length < 8 || phone.length > 15) {
+      throw new BadRequestException(
+        'Indica el número con lada de país, solo dígitos y sin el signo +.',
+      );
+    }
+    // Fuera de SCAN_QR_CODE no hay nada que emparejar (o ya está emparejada).
+    if (conn.status !== 'SCAN_QR_CODE') {
+      throw new BadRequestException(
+        'La sesión no está esperando emparejamiento. Reinicia la conexión e inténtalo de nuevo.',
+      );
+    }
+    try {
+      const code = await requestPairingCode(
+        this.baseUrlOf(conn),
+        this.crypto.decrypt(conn.accessTokenEnc),
+        conn.phoneNumberId,
+        phone,
+      );
+      return { code };
     } catch (e) {
       throw new BadRequestException((e as Error).message);
     }

@@ -170,6 +170,56 @@ export async function getGroupSubject(
   return typeof subject === 'string' && subject.trim() ? subject.trim() : null;
 }
 
+// Pide a WhatsApp un código de 8 dígitos para emparejar sin escanear.
+//
+// El código llega en la RESPUESTA, no por webhook. Nunca se loguea ni se guarda: es
+// una credencial de un solo uso para vincular un dispositivo.
+export async function requestPairingCode(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  phone: string,
+): Promise<string> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/${encodeURIComponent(session)}/auth/request-code`,
+    'POST',
+    { phoneNumber: phone },
+  );
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const m = json?.message;
+    // El soporte varía por engine: se muestra el motivo en vez de reventar.
+    throw new Error(
+      (Array.isArray(m) ? m.join('; ') : m) ??
+        'WAHA no pudo pedir el código. Puede que este engine no lo soporte.',
+    );
+  }
+  const code = json?.code ?? json?.pairingCode;
+  if (typeof code !== 'string' || !code) throw new Error('WAHA no devolvió ningún código.');
+  return code;
+}
+
+// Foto de perfil de un chat. Devuelve la URL que da WAHA (puede ser null si no hay
+// foto o la sesión aún sincroniza).
+export async function fetchChatPictureUrl(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  chatId: string,
+): Promise<string | null> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/picture`,
+    'GET',
+  );
+  if (!res.ok) return null;
+  const json: any = await res.json().catch(() => null);
+  return typeof json?.url === 'string' && json.url ? json.url : null;
+}
+
 // Mensajes anteriores de un chat. EXIGE el store del engine NOWEB.
 // `downloadMedia=false` a propósito: importar binarios de meses de historial es
 // desproporcionado; esos mensajes quedan sin adjunto.

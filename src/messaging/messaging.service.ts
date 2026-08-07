@@ -25,7 +25,8 @@ import {
 import { channelAdapter, ChannelAdapter } from './channels';
 import { checkLimits, DAY_MS, HOUR_MS, LimitConfig, limitsFromEnv } from './limits';
 import { StorageService } from '../storage/storage.service';
-import { sendReaction, sendSeen, setTyping } from '../waha/waha.client';
+import { fetchChatPictureUrl, sendReaction, sendSeen, setTyping } from '../waha/waha.client';
+import { fetchPayloadBinary } from '../waha/waha.url';
 import { applyReaction, REACTION_ME } from '../webhook/mutations';
 
 // Archivo subido (forma mínima de multer; evita depender de @types/multer).
@@ -234,6 +235,37 @@ export class MessagingService {
     const withUrl = withMediaUrl(updated, (k) => this.storage.signedUrl(k));
     this.events.emitToTenant(tenantId, 'message:updated', withUrl);
     return withUrl;
+  }
+
+  // Foto de perfil del contacto de una conversación, en base64.
+  //
+  // Se sirve por proxy y NO se guarda en una columna ni en el storage: así no hay
+  // que gestionar refresco, ni crecimiento de disco, ni el caso "la foto es null
+  // mientras la sesión sincroniza" (la siguiente carga reintenta gratis).
+  //
+  // Va en base64 dentro del JSON, como el QR: un `<img src>` no puede mandar el
+  // token de autenticación, así que un endpoint que devolviera la imagen cruda
+  // tendría que ser público y firmado.
+  //
+  // ponytail: sin caché en servidor; el navegador la cachea por el Cache-Control que
+  // pone el controlador y el frontend la pide una vez por conversación. Upgrade:
+  // guardar la key en Contact si el tráfico llega a importar.
+  async contactAvatar(tenantId: string, conversationId: string) {
+    const ctx = await this.wahaCtx(tenantId, conversationId);
+    if (!ctx) return null;
+    const url = await fetchChatPictureUrl(ctx.baseUrl, ctx.apiKey, ctx.session, ctx.chatId).catch(
+      () => null,
+    );
+    if (!url) return null;
+    try {
+      // La URL es de la CDN de WhatsApp (otro origen), así que se descarga SIN la
+      // api key y solo si no apunta hacia dentro de la red. Y con tope de tamaño.
+      const { buffer, mime } = await fetchPayloadBinary(url, ctx.baseUrl, ctx.apiKey);
+      return { mimetype: mime, data: buffer.toString('base64') };
+    } catch (e) {
+      this.logger.warn(`No se pudo traer la foto de perfil: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   // Base del proveedor: la propia de la conexión (BYO WAHA) o la instancia
