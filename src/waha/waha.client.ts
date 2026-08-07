@@ -147,6 +147,54 @@ export async function restartSession(
   if (!res.ok) throw new Error('WAHA no pudo reiniciar la sesión.');
 }
 
+// --- Acciones sobre una conversación ---------------------------------------
+// Todas son "mejor esfuerzo": si fallan, el mensaje ya se envió o se leyó igual.
+// Por eso lanzan y quien llama decide (normalmente ignorar y loguear).
+
+// Palomitas azules en el teléfono del cliente.
+export async function sendSeen(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  chatId: string,
+): Promise<void> {
+  const res = await call(baseUrl, apiKey, '/api/sendSeen', 'POST', { session, chatId });
+  if (!res.ok) throw new Error('WAHA no pudo marcar como leído.');
+}
+
+// Indicador "escribiendo…". WhatsApp NO lo manda solo: hay que emitirlo.
+export async function setTyping(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  chatId: string,
+  on: boolean,
+): Promise<void> {
+  const path = on ? '/api/startTyping' : '/api/stopTyping';
+  const res = await call(baseUrl, apiKey, path, 'POST', { session, chatId });
+  if (!res.ok) throw new Error('WAHA no pudo actualizar el indicador de escritura.');
+}
+
+// Reaccionar a un mensaje. Cadena vacía = quitar la reacción. Ojo: es PUT.
+export async function sendReaction(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  messageId: string,
+  emoji: string,
+): Promise<void> {
+  const res = await call(baseUrl, apiKey, '/api/reaction', 'PUT', {
+    session,
+    messageId,
+    reaction: emoji,
+  });
+  if (!res.ok) {
+    const json: any = await res.json().catch(() => ({}));
+    const m = json?.message;
+    throw new Error((Array.isArray(m) ? m.join('; ') : m) ?? 'WAHA rechazó la reacción.');
+  }
+}
+
 // Trae el QR de emparejamiento y lo devuelve ya en base64, para que el frontend
 // lo pinte como data: URI sin plumbing de Blob ni negociar formatos con WAHA.
 export async function fetchQr(

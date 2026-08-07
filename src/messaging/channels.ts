@@ -4,7 +4,7 @@
 // plantillas, si el media se sube (WA) o se referencia por URL (messaging), y el error.
 import { Platform } from '@prisma/client';
 import { SendDto, buildMessagePayload, mapGraphError } from './messaging.util';
-import { buildMediaPayload, MediaKind } from './media.util';
+import { buildMediaPayload, isVoiceMime, MediaKind } from './media.util';
 
 // Opciones del media al construir el cuerpo. `mimeType` solo lo usa WAHA (manda el
 // binario inline y tiene que declarar el tipo); los adaptadores de Meta lo ignoran.
@@ -12,6 +12,8 @@ export interface MediaOpts {
   caption?: string;
   filename?: string;
   mimeType?: string;
+  // wamid del mensaje que se está citando.
+  replyTo?: string;
 }
 
 export interface ChannelAdapter {
@@ -26,9 +28,19 @@ export interface ChannelAdapter {
   // El transporte no oficial arriesga el número del tenant: se le aplica ritmo y
   // cupo (ver limits.ts). Los canales de Meta ya los limita Meta.
   paced?: boolean;
+  // MIMEs que este canal acepta ADEMÁS de la lista blanca de la Cloud API
+  // (MEDIA_LIMITS). WAHA transcodifica con ffmpeg, así que traga lo que graba el
+  // navegador; la lista de Meta no se ensancha por ello.
+  extraMimes?: string[];
   windowClosedMessage: string;
-  // baseUrl y kind solo los usa WAHA (rutas fijas por tipo); version solo Meta.
-  sendUrl(externalId: string, version: string, baseUrl?: string, kind?: MediaKind): string;
+  // baseUrl, kind y mime solo los usa WAHA (rutas fijas por tipo); version solo Meta.
+  sendUrl(
+    externalId: string,
+    version: string,
+    baseUrl?: string,
+    kind?: MediaKind,
+    mime?: string,
+  ): string;
   authHeaders(token: string): Record<string, string>;
   // session solo lo usa WAHA: viaja en el cuerpo, no en la URL.
   buildText(to: string, dto: SendDto, session?: string): object;
@@ -88,7 +100,15 @@ const messaging: ChannelAdapter = {
   authHeaders: bearer,
   buildText: (to, dto) => {
     if (dto.type !== 'text') throw new Error('Este canal no soporta plantillas');
-    return { recipient: { id: to }, messaging_type: 'RESPONSE', message: { text: dto.text } };
+    return {
+      recipient: { id: to },
+      messaging_type: 'RESPONSE',
+      message: {
+        text: dto.text,
+        // Cita: en la Send API se llama `reply_to.mid`.
+        ...(dto.replyTo ? { reply_to: { mid: dto.replyTo } } : {}),
+      },
+    };
   },
   buildMedia: (to, kind, url) => ({
     recipient: { id: to },
@@ -99,17 +119,24 @@ const messaging: ChannelAdapter = {
 
 // WAHA no tiene un endpoint único: hay una ruta fija por tipo de mensaje, y el
 // destinatario y la sesión viajan en el cuerpo.
-// ponytail: audio va por sendFile porque sendVoice exige ogg/opus y aquí llega
-// cualquier audio válido para Meta. Upgrade: rutear a /api/sendVoice cuando el
-// mime sea audio/ogg (habría que pasar el mime a sendUrl).
 const WAHA_PATH: Record<MediaKind | 'text', string> = {
   text: 'sendText',
   image: 'sendImage',
   sticker: 'sendImage',
-  video: 'sendVideo',
+  // Un audio genérico (mp3, aac) va como adjunto; solo ogg/webm salen como NOTA
+  // de voz por /api/sendVoice — ver wahaSendPath.
   audio: 'sendFile',
+  video: 'sendVideo',
   document: 'sendFile',
 };
+
+// Ruta de envío de WAHA. El audio se bifurca por MIME: enviarlo todo por sendFile
+// hacía que una nota de voz llegara al teléfono como archivo adjunto en vez de
+// burbuja reproducible.
+function wahaSendPath(kind: MediaKind | 'text', mime?: string): string {
+  if (kind === 'audio' && mime && isVoiceMime(mime)) return 'sendVoice';
+  return WAHA_PATH[kind];
+}
 
 // WAHA (https://waha.devlike.pro): WhatsApp Web self-hosted. No es API de Meta,
 // así que no hay ventana de 24 h ni plantillas. Auth por X-Api-Key de instancia.
@@ -119,14 +146,22 @@ const waha: ChannelAdapter = {
   enforcesWindow: false,
   mediaAsBase64: true,
   paced: true,
+  // WAHA transcodifica con ffmpeg, así que acepta lo que graba el navegador
+  // (Chrome/Edge dan audio/webm; Safari audio/mp4).
+  extraMimes: ['audio/webm', 'audio/ogg'],
   windowClosedMessage: '', // nunca se usa: enforcesWindow es false
   // El primer argumento (id externo) se ignora: la sesión va en el cuerpo.
-  sendUrl: (_externalId, _version, baseUrl = '', kind) =>
-    `${baseUrl.replace(/\/$/, '')}/api/${WAHA_PATH[kind ?? 'text']}`,
+  sendUrl: (_externalId, _version, baseUrl = '', kind, mime) =>
+    `${baseUrl.replace(/\/$/, '')}/api/${wahaSendPath(kind ?? 'text', mime)}`,
   authHeaders: (apiKey) => ({ 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }),
   buildText: (chatId, dto, session) => {
     if (dto.type !== 'text') throw new Error('WAHA no soporta plantillas de Meta');
-    return { session, chatId, text: dto.text };
+    return {
+      session,
+      chatId,
+      text: dto.text,
+      ...(dto.replyTo ? { reply_to: dto.replyTo } : {}),
+    };
   },
   buildMedia: (chatId, kind, dataB64, opts, session) => ({
     session,
@@ -140,6 +175,12 @@ const waha: ChannelAdapter = {
     ...(opts.caption && kind !== 'sticker' && kind !== 'audio'
       ? { caption: opts.caption }
       : {}),
+    // Notas de voz: WhatsApp exige ogg/opus, y el navegador graba webm. WAHA lo
+    // transcodifica con ffmpeg si se le pide (verificado en la imagen `noweb`).
+    ...(kind === 'audio' && opts.mimeType && isVoiceMime(opts.mimeType)
+      ? { convert: true }
+      : {}),
+    ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
   }),
   // WAHA devuelve el mensaje en la raíz; `id` es string en unos engines y
   // { _serialized } en otros. Sin esto `wamid` quedaría nulo y los acuses

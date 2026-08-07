@@ -3,9 +3,10 @@
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// `replyTo` = wamid del mensaje citado. Opcional y transversal a los dos tipos.
 export type SendDto =
-  | { type: 'text'; text: string }
-  | { type: 'template'; name: string; language: string; components?: unknown[] };
+  | { type: 'text'; text: string; replyTo?: string }
+  | { type: 'template'; name: string; language: string; components?: unknown[]; replyTo?: string };
 
 // Dentro de la ventana de servicio si el último entrante fue hace < 24 h.
 export function isWithinWindow(
@@ -18,7 +19,12 @@ export function isWithinWindow(
 
 // Construye el cuerpo que espera POST /{phoneNumberId}/messages.
 export function buildMessagePayload(to: string, dto: SendDto): object {
-  const base = { messaging_product: 'whatsapp', to };
+  const base = {
+    messaging_product: 'whatsapp',
+    to,
+    // Cita: en Cloud API se llama `context.message_id`.
+    ...(dto.replyTo ? { context: { message_id: dto.replyTo } } : {}),
+  };
   if (dto.type === 'template') {
     return {
       ...base,
@@ -42,8 +48,11 @@ export function buildMessagePayload(to: string, dto: SendDto): object {
 // `payload.text.body` → burbuja vacía y búsqueda ciega. Se usa la forma de Meta
 // porque es la que ya esperaba el frontend y a la que normalizan los decoders.
 export function storedTextPayload(dto: SendDto): object {
+  // El wamid citado se guarda para que el hilo pueda pintar la cita.
+  const quote = dto.replyTo ? { replyToWamid: dto.replyTo } : {};
   if (dto.type === 'template') {
     return {
+      ...quote,
       template: {
         name: dto.name,
         language: { code: dto.language },
@@ -51,7 +60,7 @@ export function storedTextPayload(dto: SendDto): object {
       },
     };
   }
-  return { text: { body: dto.text } };
+  return { ...quote, text: { body: dto.text } };
 }
 
 // Mapea códigos de error comunes de la Graph API a mensajes accionables.

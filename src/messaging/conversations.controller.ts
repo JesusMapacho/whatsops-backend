@@ -55,6 +55,27 @@ export class ConversationsController {
     return this.messaging.send(user.tenantId, id, body);
   }
 
+  // Indicador "escribiendo…" hacia el cliente. El cooldown lo aplica el servicio:
+  // el debounce del navegador no es un control.
+  @Post(':id/typing')
+  async typing(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.messaging.setTyping(user.tenantId, id, body?.on !== false);
+  }
+
+  // Reaccionar a un mensaje con un emoji. Cadena vacía = quitar la reacción.
+  @Post(':id/messages/:wamid/reaction')
+  async react(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Param('wamid') wamid: string,
+    @Body() body: any,
+  ) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    const emoji = typeof body?.emoji === 'string' ? body.emoji : '';
+    return this.messaging.react(user.tenantId, id, wamid, emoji);
+  }
+
   @Post(':id/media')
   // 100 MB = tope de documento de Meta; multer rechaza antes de bufferizar de más.
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
@@ -63,9 +84,10 @@ export class ConversationsController {
     @Param('id') id: string,
     @UploadedFile() file: UploadedMediaFile,
     @Body('caption') caption?: string,
+    @Body('replyTo') replyTo?: string,
   ) {
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
-    return this.messaging.sendMedia(user.tenantId, id, file, caption);
+    return this.messaging.sendMedia(user.tenantId, id, file, caption, replyTo);
   }
 
   @Post(':id/assign')

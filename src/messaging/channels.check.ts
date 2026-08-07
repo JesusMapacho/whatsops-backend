@@ -56,6 +56,16 @@ assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'image'), `${B}/api/sendImage
 assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'sticker'), `${B}/api/sendImage`);
 assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'video'), `${B}/api/sendVideo`);
 assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'audio'), `${B}/api/sendFile`);
+// El audio se bifurca por MIME: solo ogg/webm salen como NOTA de voz. Antes todo
+// iba por sendFile y llegaba al teléfono como archivo adjunto.
+assert.strictEqual(
+  waha.sendUrl('t_x', 'v22.0', B, 'audio', 'audio/ogg; codecs=opus'),
+  `${B}/api/sendVoice`,
+);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'audio', 'audio/webm'), `${B}/api/sendVoice`);
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'audio', 'audio/mpeg'), `${B}/api/sendFile`);
+// Y solo el audio: una imagen no se convierte en nota de voz por el mime.
+assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'image', 'audio/ogg'), `${B}/api/sendImage`);
 assert.strictEqual(waha.sendUrl('t_x', 'v22.0', B, 'document'), `${B}/api/sendFile`);
 // Barra final en la base no duplica la del path.
 assert.strictEqual(waha.sendUrl('t_x', 'v22.0', `${B}/`), `${B}/api/sendText`);
@@ -114,5 +124,42 @@ assert.strictEqual(waha.messageId!(null), null);
 assert.strictEqual(waha.mapError({ message: 'boom' }), 'boom');
 assert.strictEqual(waha.mapError({ message: ['a', 'b'] }), 'a; b');
 assert.strictEqual(waha.mapError({}), 'WAHA rechazó el envío.');
+
+// --- Citas: cada canal la nombra distinto ---
+assert.strictEqual(
+  (waha.buildText('5@c.us', { type: 'text', text: 'x', replyTo: 'W1' }, 't') as any).reply_to,
+  'W1',
+);
+assert.deepStrictEqual(
+  (wa.buildText('521555', { type: 'text', text: 'x', replyTo: 'W1' }) as any).context,
+  { message_id: 'W1' },
+);
+assert.deepStrictEqual(
+  (msn.buildText('PSID', { type: 'text', text: 'x', replyTo: 'W1' }) as any).message.reply_to,
+  { mid: 'W1' },
+);
+// Sin cita, el campo se OMITE (no va como undefined).
+assert.ok(!('reply_to' in (waha.buildText('5@c.us', { type: 'text', text: 'x' }, 't') as any)));
+assert.ok(!('context' in (wa.buildText('521555', { type: 'text', text: 'x' }) as any)));
+
+// --- convert:true solo en notas de voz ---
+// WhatsApp exige ogg/opus y el navegador graba webm; WAHA transcodifica si se pide.
+assert.strictEqual(
+  (waha.buildMedia('5@c.us', 'audio', 'B64', { mimeType: 'audio/webm' }, 't') as any).convert,
+  true,
+);
+assert.strictEqual(
+  (waha.buildMedia('5@c.us', 'audio', 'B64', { mimeType: 'audio/mpeg' }, 't') as any).convert,
+  undefined,
+);
+assert.strictEqual(
+  (waha.buildMedia('5@c.us', 'image', 'B64', { mimeType: 'image/jpeg' }, 't') as any).convert,
+  undefined,
+);
+
+// WAHA acepta lo que graba el navegador; los canales de Meta no declaran extras.
+assert.deepStrictEqual(waha.extraMimes, ['audio/webm', 'audio/ogg']);
+assert.strictEqual(wa.extraMimes, undefined);
+assert.strictEqual(msn.extraMimes, undefined);
 
 console.log('channels.check OK');

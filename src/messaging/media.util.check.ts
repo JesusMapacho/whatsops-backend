@@ -2,13 +2,48 @@
 import { strict as assert } from 'node:assert';
 import { randomBytes } from 'node:crypto';
 import {
+  baseMime,
   buildMediaPayload,
+  isVoiceMime,
   kindForMime,
   signMedia,
   validateMedia,
   verifyMedia,
   withMediaUrl,
 } from './media.util';
+
+// --- Normalización de MIME ---
+// Las notas de voz de WhatsApp llegan SIEMPRE con parámetros. Sin quitarlos, la
+// comparación exacta contra MEDIA_LIMITS las rechazaba con "MIME no permitido", o
+// sea que el botón de grabar nunca habría funcionado.
+assert.equal(baseMime('audio/ogg; codecs=opus'), 'audio/ogg');
+assert.equal(baseMime('audio/webm;codecs=opus'), 'audio/webm');
+assert.equal(baseMime('  AUDIO/OGG  '), 'audio/ogg');
+assert.equal(baseMime(''), '');
+assert.equal(kindForMime('audio/ogg; codecs=opus'), 'audio');
+
+// El caso exacto que fallaba antes de la feature 28.
+assert.equal(validateMedia('audio/ogg; codecs=opus', 1000), 'audio');
+
+// --- extraMimes del adaptador ---
+// El navegador graba webm, que NO está en la lista blanca de la Cloud API. WAHA lo
+// acepta porque transcodifica; la lista de Meta no se ensancha por ello (si lo
+// hiciera, Meta lo rechazaría después con un error peor).
+assert.throws(() => validateMedia('audio/webm', 1000), /MIME no permitido/);
+assert.equal(validateMedia('audio/webm', 1000, ['audio/webm', 'audio/ogg']), 'audio');
+// Los extras no relajan el límite de tamaño.
+assert.throws(
+  () => validateMedia('audio/webm', 20 * 1024 * 1024, ['audio/webm']),
+  /demasiado grande/,
+);
+
+// --- Qué cuenta como nota de voz ---
+assert.ok(isVoiceMime('audio/ogg; codecs=opus'));
+assert.ok(isVoiceMime('audio/webm'));
+// Un mp3 o un aac adjunto NO es nota de voz: va como archivo.
+assert.ok(!isVoiceMime('audio/mpeg'));
+assert.ok(!isVoiceMime('audio/aac'));
+assert.ok(!isVoiceMime('image/png'));
 
 // kindForMime
 assert.equal(kindForMime('image/jpeg'), 'image');

@@ -17,6 +17,7 @@ import {
   templateBody,
 } from './messaging.util';
 import {
+  isVoiceMime,
   uploadToGraph,
   validateMedia,
   withMediaUrl,
@@ -24,6 +25,8 @@ import {
 import { channelAdapter, ChannelAdapter } from './channels';
 import { checkLimits, DAY_MS, HOUR_MS, LimitConfig, limitsFromEnv } from './limits';
 import { StorageService } from '../storage/storage.service';
+import { sendReaction, sendSeen, setTyping } from '../waha/waha.client';
+import { applyReaction } from '../webhook/mutations';
 
 // Archivo subido (forma mínima de multer; evita depender de @types/multer).
 export interface UploadedMediaFile {
@@ -36,6 +39,13 @@ export interface UploadedMediaFile {
 // ponytail: versión de Graph fija con override por env (igual que waba.service).
 const GRAPH_VERSION = 'v22.0';
 
+// Mínimo entre dos "escribiendo…" de la misma conversación.
+const TYPING_COOLDOWN_MS = 3000;
+
+// Autor de NUESTRAS reacciones en payload.reactions. No es un waId, así que no
+// puede chocar con el de un contacto.
+const ME = 'me';
+
 @Injectable()
 export class MessagingService {
   private readonly graphVersion: string;
@@ -47,6 +57,7 @@ export class MessagingService {
   private readonly wahaUrl: string;
   private readonly limits: LimitConfig;
   private readonly logger = new Logger(MessagingService.name);
+  private readonly typingAt = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -146,6 +157,88 @@ export class MessagingService {
     });
   }
 
+  // --- Acciones de conversación sobre WAHA -----------------------------------
+  // Las tres comparten el mismo baile (resolver conversación → descifrar la key →
+  // resolver baseUrl), así que vive una sola vez aquí. Devuelve null si la
+  // conversación no es de WAHA: en los canales de Meta estas acciones no aplican.
+  private async wahaCtx(tenantId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, tenantId, platform: 'waha' },
+      include: { contact: true, wabaConnection: true },
+    });
+    if (!conv) return null;
+    return {
+      baseUrl: this.baseUrlFor(conv.wabaConnection),
+      apiKey: this.crypto.decrypt(conv.wabaConnection.accessTokenEnc),
+      session: conv.wabaConnection.phoneNumberId,
+      chatId: conv.contact.waId,
+    };
+  }
+
+  // Palomitas azules. Mejor esfuerzo: si falla, el agente ya leyó el mensaje igual.
+  async markSeen(tenantId: string, conversationId: string) {
+    const ctx = await this.wahaCtx(tenantId, conversationId);
+    if (!ctx) return;
+    await sendSeen(ctx.baseUrl, ctx.apiKey, ctx.session, ctx.chatId);
+  }
+
+  // Indicador "escribiendo…". WhatsApp no lo manda solo.
+  //
+  // El cooldown va en el SERVIDOR y no solo en el navegador: un cliente colgado o
+  // un curl en bucle convertiría esto en llamadas de presencia sin límite sobre el
+  // WhatsApp real del tenant, que es justo el riesgo de reputación que limits.ts
+  // existe para evitar. No hay throttler global en el repo.
+  // ponytail: Map en memoria; con varias réplicas cada una tiene su ventana.
+  // Upgrade: contador en Redis (ya está ahí por BullMQ) si llega a importar.
+  async setTyping(tenantId: string, conversationId: string, on: boolean) {
+    if (on) {
+      const last = this.typingAt.get(conversationId) ?? 0;
+      if (Date.now() - last < TYPING_COOLDOWN_MS) return { skipped: true };
+      this.typingAt.set(conversationId, Date.now());
+    } else {
+      this.typingAt.delete(conversationId);
+    }
+    const ctx = await this.wahaCtx(tenantId, conversationId);
+    if (!ctx) return { skipped: true };
+    await setTyping(ctx.baseUrl, ctx.apiKey, ctx.session, ctx.chatId, on);
+    return { ok: true };
+  }
+
+  // Reacciona a un mensaje (emoji vacío = quitar).
+  //
+  // Se escribe también en nuestra copia al recibir 2xx: WAHA no manda webhook
+  // fiable de tu PROPIA reacción en todos los engines, así que si no, el emoji
+  // desaparecería al refrescar.
+  async react(tenantId: string, conversationId: string, wamid: string, emoji: string) {
+    const ctx = await this.wahaCtx(tenantId, conversationId);
+    if (!ctx) throw new BadRequestException('Reaccionar solo está disponible en WhatsApp por QR.');
+    const target = await this.prisma.message.findUnique({
+      where: { tenantId_wamid: { tenantId, wamid } },
+    });
+    if (!target || target.conversationId !== conversationId) {
+      throw new NotFoundException('Mensaje no encontrado');
+    }
+
+    try {
+      await sendReaction(ctx.baseUrl, ctx.apiKey, ctx.session, wamid, emoji);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+
+    const payload = (target.payload ?? {}) as Record<string, unknown>;
+    const updated = await this.prisma.message.update({
+      where: { id: target.id },
+      // El autor somos nosotros: se identifica con la sesión, que es estable y no
+      // choca con los waId de los contactos.
+      data: {
+        payload: { ...payload, reactions: applyReaction(payload.reactions, ME, emoji) },
+      },
+    });
+    const withUrl = withMediaUrl(updated, (k) => this.storage.signedUrl(k));
+    this.events.emitToTenant(tenantId, 'message:updated', withUrl);
+    return withUrl;
+  }
+
   // Base del proveedor: la propia de la conexión (BYO WAHA) o la instancia
   // gestionada de env. Vacío para Meta, que lleva el host en el adaptador.
   private baseUrlFor(conn: { baseUrl: string | null }): string {
@@ -210,21 +303,26 @@ export class MessagingService {
     conversationId: string,
     file: UploadedMediaFile,
     caption?: string,
+    replyTo?: string,
   ) {
     if (!file?.buffer?.length) throw new BadRequestException('Archivo requerido');
-    let kind;
-    try {
-      kind = validateMedia(file.mimetype, file.size);
-    } catch (e) {
-      throw new BadRequestException((e as Error).message);
-    }
 
+    // La conversación se carga ANTES de validar: los MIMEs permitidos dependen del
+    // canal (WAHA transcodifica y acepta lo que graba el navegador).
     const conv = await this.prisma.conversation.findFirst({
       where: { id: conversationId, tenantId },
       include: { contact: true, wabaConnection: true },
     });
     if (!conv) throw new NotFoundException('Conversación no encontrada');
     const adapter = channelAdapter(conv.platform);
+
+    let kind;
+    try {
+      kind = validateMedia(file.mimetype, file.size, adapter.extraMimes);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+
     if (adapter.enforcesWindow && !isWithinWindow(conv.lastInboundAt)) {
       throw new BadRequestException(adapter.windowClosedMessage);
     }
@@ -234,12 +332,16 @@ export class MessagingService {
     const filename = kind === 'document' ? file.originalname : undefined;
     // Guardamos una copia propia (para el hilo).
     const mediaKey = await this.storage.put(file.buffer, file.mimetype, filename);
+    // Nota de voz vs audio adjunto: cambia el icono y el texto de la vista previa.
+    const voice = kind === 'audio' && isVoiceMime(file.mimetype);
     const dbPayload = {
       kind,
       mediaKey,
       mimeType: file.mimetype,
       ...(filename ? { filename } : {}),
       ...(caption ? { caption } : {}),
+      ...(voice ? { voice: true } : {}),
+      ...(replyTo ? { replyToWamid: replyTo } : {}),
     };
 
     // WhatsApp: subir el binario a Meta y referenciar por media-id.
@@ -275,7 +377,7 @@ export class MessagingService {
       conv.contact.waId,
       kind,
       mediaRef,
-      { caption, filename, mimeType: file.mimetype },
+      { caption, filename, mimeType: file.mimetype, replyTo },
       session,
     );
     const url = adapter.sendUrl(
@@ -283,6 +385,8 @@ export class MessagingService {
       this.graphVersion,
       this.baseUrlFor(conv.wabaConnection),
       kind,
+      // El mime decide la ruta: una nota de voz va por sendVoice, no por sendFile.
+      file.mimetype,
     );
 
     let res: Response;
@@ -372,16 +476,20 @@ export class MessagingService {
 
 // Validación en la frontera de confianza: el body llega como `any` del cliente.
 function parseSendDto(body: any): SendDto {
+  // wamid del mensaje citado. Opcional en los dos tipos.
+  const replyTo =
+    typeof body?.replyTo === 'string' && body.replyTo.trim() ? body.replyTo.trim() : undefined;
   if (body?.type === 'template') {
     return {
       type: 'template',
       name: str(body?.name, 'name'),
       language: str(body?.language, 'language'),
       components: Array.isArray(body?.components) ? body.components : undefined,
+      ...(replyTo ? { replyTo } : {}),
     };
   }
   if (body?.type === 'text' || body?.text !== undefined) {
-    return { type: 'text', text: str(body?.text, 'text') };
+    return { type: 'text', text: str(body?.text, 'text'), ...(replyTo ? { replyTo } : {}) };
   }
   throw new BadRequestException('type debe ser "text" o "template"');
 }

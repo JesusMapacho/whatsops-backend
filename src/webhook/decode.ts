@@ -182,6 +182,11 @@ function decodeWahaMessage(payload: any): InboundMessage | null {
       // Marca el eco para el badge de la burbuja y —importante— para excluirlo
       // del ritmo por contacto (ver limits.ts).
       ...(payload.fromMe ? { viaDevice: true } : {}),
+      // Nota de voz (push-to-talk) vs audio adjunto: el engine NOWEB lo marca en
+      // el mensaje crudo; el mime a secas no distingue una cosa de la otra.
+      ...(payload._data?.message?.audioMessage?.ptt ? { voice: true } : {}),
+      // Mensaje citado, para que el hilo pinte la cita.
+      ...(payload.replyTo?.id ? { replyToWamid: payload.replyTo.id } : {}),
     },
     // El engine NOWEB lo manda como `_data.pushName`; otros como `notifyName`.
     // Sin esto el contacto queda sin nombre y el agente solo ve un id (que con

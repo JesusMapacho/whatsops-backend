@@ -1,17 +1,21 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { StorageService } from '../storage/storage.service';
 import { withMediaUrl } from './media.util';
 import { buildConversationWhere, conversationScopeWhere, parseStatus } from './conversations.util';
+import { MessagingService } from './messaging.service';
 
 @Injectable()
 export class ConversationsService {
+  private readonly logger = new Logger(ConversationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsGateway,
     private readonly storage: StorageService,
+    private readonly messaging: MessagingService,
   ) {}
 
   async list(
@@ -75,6 +79,16 @@ export class ConversationsService {
       where: { id },
       data: { lastReadAt: new Date() },
     });
+
+    // Y avisarle al cliente (palomitas azules). Solo en la PRIMERA página: este
+    // mismo método pagina hacia atrás con `before`, y ahí re-avisar no tiene
+    // sentido. Mejor esfuerzo y con catch obligatorio: una promesa rechazada sin
+    // manejar tumba el proceso de Node, y el fetch a un WAHA caído rechaza.
+    if (!before) {
+      this.messaging
+        .markSeen(tenantId, id)
+        .catch((e: Error) => this.logger.warn(`No se pudo marcar como leído: ${e.message}`));
+    }
 
     // Adjunta una mediaUrl firmada y temporal a los mensajes con adjunto.
     return page.reverse().map((m) => withMediaUrl(m, (k) => this.storage.signedUrl(k)));

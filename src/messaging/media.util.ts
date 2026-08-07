@@ -16,21 +16,37 @@ export const MEDIA_LIMITS: Record<MediaKind, { mimes: string[]; maxBytes: number
   document: { mimes: [], maxBytes: 100 * 1024 * 1024 }, // document acepta cualquier MIME
 };
 
+// Quita los parámetros del MIME: 'audio/ogg; codecs=opus' → 'audio/ogg'.
+// Las notas de voz de WhatsApp llegan SIEMPRE con `codecs=opus`, y sin esto la
+// comparación exacta contra MEDIA_LIMITS las rechazaba con "MIME no permitido".
+export function baseMime(mime: string): string {
+  return (mime ?? '').split(';')[0].trim().toLowerCase();
+}
+
 // Deriva el tipo de mensaje a partir del MIME. webp → sticker; resto de imagen → image.
 export function kindForMime(mime: string): MediaKind {
-  if (mime === 'image/webp') return 'sticker';
-  if (mime.startsWith('image/')) return 'image';
-  if (mime.startsWith('audio/')) return 'audio';
-  if (mime.startsWith('video/')) return 'video';
+  const m = baseMime(mime);
+  if (m === 'image/webp') return 'sticker';
+  if (m.startsWith('image/')) return 'image';
+  if (m.startsWith('audio/')) return 'audio';
+  if (m.startsWith('video/')) return 'video';
   return 'document';
 }
 
 // Valida MIME + tamaño contra el límite del tipo. Devuelve el kind o lanza Error con mensaje claro.
-export function validateMedia(mime: string, size: number): MediaKind {
-  const kind = kindForMime(mime);
+//
+// `extraMimes` los aporta el adaptador del canal: WAHA transcodifica con ffmpeg y
+// acepta lo que graba el navegador (audio/webm), mientras que MEDIA_LIMITS es la
+// lista blanca de la Cloud API y no debe ensancharse — Meta lo rechazaría luego
+// con un error peor.
+export function validateMedia(mime: string, size: number, extraMimes: string[] = []): MediaKind {
+  const m = baseMime(mime);
+  const kind = kindForMime(m);
   const limit = MEDIA_LIMITS[kind];
-  if (limit.mimes.length && !limit.mimes.includes(mime)) {
-    throw new Error(`MIME no permitido para ${kind}: ${mime}`);
+  // Lista vacía (document) = cualquier MIME.
+  const rejected = limit.mimes.length && !limit.mimes.includes(m) && !extraMimes.includes(m);
+  if (rejected) {
+    throw new Error(`MIME no permitido para ${kind}: ${m}`);
   }
   if (size > limit.maxBytes) {
     throw new Error(
@@ -38,6 +54,14 @@ export function validateMedia(mime: string, size: number): MediaKind {
     );
   }
   return kind;
+}
+
+// ¿Es una nota de voz? Solo los formatos que WhatsApp reproduce como tal (o que
+// WAHA puede transcodificar). Un mp3 adjunto sigue siendo un audio normal.
+const VOICE_MIMES = ['audio/ogg', 'audio/webm'];
+
+export function isVoiceMime(mime: string): boolean {
+  return VOICE_MIMES.includes(baseMime(mime));
 }
 
 // Cuerpo que espera POST /{phoneNumberId}/messages para un mensaje de media.
