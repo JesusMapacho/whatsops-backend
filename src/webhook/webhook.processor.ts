@@ -11,6 +11,7 @@ import { downloadFromGraph, withMediaUrl, MediaKind } from '../messaging/media.u
 import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './decode';
 import { applyReaction } from './mutations';
 import { fetchPayloadBinary, wahaMediaUrl } from '../waha/waha.url';
+import { openConversation, resolveContact } from '../messaging/contact-resolve';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -106,41 +107,26 @@ export class WebhookProcessor extends WorkerHost {
     });
     if (seen) return;
 
-    const contact = await this.prisma.contact.upsert({
-      where: { tenantId_platform_waId: { tenantId, platform: conn.platform, waId: msg.from } },
-      create: {
-        tenantId,
-        platform: conn.platform,
-        waId: msg.from,
-        name: msg.contactName,
-        ...(msg.phone ? { phone: msg.phone } : {}),
-        ...(msg.isGroup ? { isGroup: true } : {}),
-      },
-      update: {
-        ...(msg.contactName ? { name: msg.contactName } : {}),
-        ...(msg.phone ? { phone: msg.phone } : {}),
-      },
+    // Misma función que usa la creación de conversación en frío: si se duplicara la
+    // lógica aquí, los dos caminos derivarían y volverían los contactos partidos.
+    const contact = await resolveContact(this.prisma, {
+      tenantId,
+      platform: conn.platform,
+      waId: msg.from,
+      phone: msg.phone,
+      name: msg.contactName,
+      isGroup: msg.isGroup,
     });
 
-    const open = await this.prisma.conversation.findFirst({
-      where: { tenantId, contactId: contact.id, wabaConnectionId: conn.id, status: { not: 'closed' } },
-      orderBy: { createdAt: 'desc' },
-    });
     // `lastInboundAt` es la fuente de verdad de la ventana de 24 h: un eco NUESTRO
     // no debe extenderla (en los canales de Meta eso llevaría a un 131047).
-    const touch = direction === 'in' ? { lastInboundAt: new Date() } : {};
-    const conversation = open
-      ? await this.prisma.conversation.update({ where: { id: open.id }, data: touch })
-      : await this.prisma.conversation.create({
-          data: {
-            tenantId,
-            platform: conn.platform,
-            contactId: contact.id,
-            wabaConnectionId: conn.id,
-            status: 'open',
-            ...(direction === 'in' ? { lastInboundAt: new Date() } : {}),
-          },
-        });
+    const conversation = await openConversation(this.prisma, {
+      tenantId,
+      platform: conn.platform,
+      contactId: contact.id,
+      wabaConnectionId: conn.id,
+      inbound: direction === 'in',
+    });
 
     // Red de seguridad de la duplicación: si el envío por la app no consiguió el
     // wamid de la respuesta del proveedor, su fila quedó con wamid null y el eco no

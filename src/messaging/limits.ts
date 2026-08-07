@@ -7,9 +7,11 @@
 // la instancia, un tenant que spamea no solo quema su número: quema el patrón de
 // nuestra IP y arrastra a los demás tenants de la misma instancia.
 //
-// La regla "nunca inicies conversación" ya se cumple estructuralmente: las
-// Conversation solo nacen de un inbound y no hay UI de conversación nueva. Lo que
-// falta —y esto lo cubre— es el RITMO.
+// OJO: hasta la feature 29 la regla "nunca inicies conversación" se cumplía
+// ESTRUCTURALMENTE, porque las Conversation solo nacían de un inbound. Eso ya NO es
+// cierto: ahora se puede escribir primero. El invariante estructural se sustituye por
+// topes explícitos de PRIMER CONTACTO (ver isCold y los campos maxCold*), que son la
+// única cosa que impide juntar las 5-10 marcas de spam que banean un número.
 
 export interface LimitConfig {
   // Salientes por hora al MISMO contacto. Def. 4, de la guía de WAHA.

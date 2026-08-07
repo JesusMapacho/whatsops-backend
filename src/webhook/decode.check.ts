@@ -161,6 +161,28 @@ assert.strictEqual(gm.contactName, null);
 // Ni se le atribuye al grupo el teléfono de nadie.
 assert.ok(!('phone' in gm));
 
+// CONTRAPRUEBA CATASTRÓFICA: un grupo NUNCA debe llevar `phone`, ni aunque el payload
+// traiga un `remoteJidAlt`. Si lo llevara, `resolveContact` podría fusionar el hilo
+// del GRUPO con la conversación privada de ese miembro — una conversación privada
+// convertida en la del grupo.
+const grupoConAlt = decodeWebhook(
+  wahaEnvelope('message', {
+    id: 'gAlt',
+    from: '12345-1600000000@g.us',
+    participant: '521777@c.us',
+    body: 'x',
+    _data: {
+      key: {
+        remoteJid: '12345-1600000000@g.us',
+        participant: '521777@c.us',
+        remoteJidAlt: '5218715172350@s.whatsapp.net',
+      },
+    },
+  }),
+)[0].messages[0];
+assert.ok(!('phone' in grupoConAlt), 'un grupo NO puede llevar teléfono');
+assert.strictEqual(grupoConAlt.isGroup, true);
+
 // El autor también sale de `_data.key.participant` cuando no viene en la raíz.
 assert.deepStrictEqual(
   (
