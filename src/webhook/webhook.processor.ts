@@ -8,7 +8,8 @@ import { EventsGateway } from '../events/events.gateway';
 import { CryptoService } from '../crypto/crypto.service';
 import { StorageService } from '../storage/storage.service';
 import { downloadFromGraph, withMediaUrl, MediaKind } from '../messaging/media.util';
-import { decodeWebhook, InboundMessage, StatusUpdate } from './decode';
+import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './decode';
+import { applyReaction } from './mutations';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -65,6 +66,9 @@ export class WebhookProcessor extends WorkerHost {
         }
         for (const st of change.statuses) {
           await this.handleStatus(conn.tenantId, st);
+        }
+        for (const mut of change.mutations ?? []) {
+          await this.handleMutation(conn.tenantId, mut);
         }
       }
       await this.prisma.webhookEvent.update({
@@ -243,6 +247,43 @@ export class WebhookProcessor extends WorkerHost {
       this.logger.warn(`No se pudo descargar adjunto ${conn.platform}: ${(err as Error).message}`);
       return { kind, error: true };
     }
+  }
+
+  // Reacción o borrado sobre un mensaje ya persistido.
+  //
+  // Si no tenemos el mensaje (previo al emparejamiento, filtrado por no ser 1-a-1,
+  // o de un historial no importado) es un NO-OP, nunca un error: si lanzara, BullMQ
+  // reintentaría 3 veces y el evento quedaría `failed` para siempre ensuciando la
+  // auditoría, por algo que no tiene arreglo.
+  private async handleMutation(tenantId: string, mut: MessageMutation) {
+    const target = await this.prisma.message.findUnique({
+      where: { tenantId_wamid: { tenantId, wamid: mut.wamid } },
+    });
+    if (!target) return;
+
+    let updated;
+    if (mut.kind === 'revoked') {
+      updated = await this.prisma.message.update({
+        where: { id: target.id },
+        data: { deletedAt: new Date() },
+      });
+    } else {
+      const payload = (target.payload ?? {}) as Record<string, unknown>;
+      updated = await this.prisma.message.update({
+        where: { id: target.id },
+        data: {
+          payload: {
+            ...payload,
+            reactions: applyReaction(payload.reactions, mut.author, mut.emoji),
+          },
+        },
+      });
+    }
+    this.events.emitToTenant(
+      tenantId,
+      'message:updated',
+      withMediaUrl(updated, (k) => this.storage.signedUrl(k)),
+    );
   }
 
   private async handleStatus(tenantId: string, st: StatusUpdate) {

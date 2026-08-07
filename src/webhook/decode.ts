@@ -31,11 +31,19 @@ export interface StatusUpdate {
   status: MessageStatus;
 }
 
+// Cambio sobre un mensaje que YA existe: el cliente reaccionó, lo borró o lo editó.
+// Se identifican por el wamid del mensaje ORIGINAL, no por uno nuevo.
+export type MessageMutation =
+  | { kind: 'reaction'; wamid: string; author: string; emoji: string }
+  | { kind: 'revoked'; wamid: string };
+
 export interface NormalizedChange {
   platform: Platform;
   channelRef: string | null; // phone_number_id (WA) / page id (Messenger) / IG id / sesión (WAHA)
   messages: InboundMessage[];
   statuses: StatusUpdate[];
+  // Reacciones/borrados sobre mensajes ya persistidos.
+  mutations?: MessageMutation[];
   // Estado vivo de la sesión (solo WAHA): el worker lo refleja en WabaConnection.status.
   sessionStatus?: string;
 }
@@ -223,6 +231,48 @@ function decodeWaha(p: any): NormalizedChange[] {
         },
       ];
     }
+    // El cliente reaccionó a un mensaje. `reaction.text` vacío = quitó la reacción.
+    case 'message.reaction': {
+      const target = payload.reaction?.messageId;
+      const author = payload._data?.key?.remoteJid || payload.from || '';
+      if (typeof target !== 'string' || !target || !author) {
+        return [{ ...base, messages: [], statuses: [] }];
+      }
+      return [
+        {
+          ...base,
+          messages: [],
+          statuses: [],
+          mutations: [
+            {
+              kind: 'reaction',
+              wamid: target,
+              author,
+              emoji: typeof payload.reaction?.text === 'string' ? payload.reaction.text : '',
+            },
+          ],
+        },
+      ];
+    }
+    // Mensaje borrado por su autor. El id del mensaje afectado viene en
+    // `before.id`: el payload NO tiene `id` en la raíz, así que buscarlo ahí
+    // dejaría el parcheo sin efecto, en silencio.
+    case 'message.revoked': {
+      const target = payload.before?.id;
+      if (typeof target !== 'string' || !target) {
+        return [{ ...base, messages: [], statuses: [] }];
+      }
+      return [
+        { ...base, messages: [], statuses: [], mutations: [{ kind: 'revoked', wamid: target }] },
+      ];
+    }
+    // ponytail: `message.edited` se SUSCRIBE pero no se decodifica todavía. WAHA
+    // documenta el evento y no publica su payload, y escribir un decoder contra una
+    // forma que no hemos visto guarda datos mal en silencio (ya pasó con @lid).
+    // Suscribirlo ES el mecanismo de captura: el evento aterriza en
+    // WebhookEvent.rawPayload, se mira la forma real y entonces se implementa.
+    case 'message.edited':
+      return [{ ...base, messages: [], statuses: [] }];
     case 'session.status':
       return [
         {

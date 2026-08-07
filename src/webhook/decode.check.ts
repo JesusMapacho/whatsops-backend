@@ -281,6 +281,67 @@ assert.deepStrictEqual(
   [],
 );
 
+// --- Reacciones entrantes ---
+const react = decodeWebhook(
+  wahaEnvelope('message.reaction', {
+    id: 'reactEvt',
+    from: '521555@c.us',
+    reaction: { text: '🙏', messageId: 'false_521555@c.us_AAA' },
+    _data: { key: { remoteJid: '521555@c.us' } },
+  }),
+);
+// Apunta al mensaje ORIGINAL, no crea uno nuevo.
+assert.deepStrictEqual(react[0].messages, []);
+assert.deepStrictEqual(react[0].mutations, [
+  { kind: 'reaction', wamid: 'false_521555@c.us_AAA', author: '521555@c.us', emoji: '🙏' },
+]);
+// Texto vacío = quitó la reacción (no es "sin reacción").
+assert.deepStrictEqual(
+  decodeWebhook(
+    wahaEnvelope('message.reaction', {
+      from: '521555@c.us',
+      reaction: { text: '', messageId: 'm1' },
+    }),
+  )[0].mutations,
+  [{ kind: 'reaction', wamid: 'm1', author: '521555@c.us', emoji: '' }],
+);
+// Sin messageId no hay nada que parchear.
+assert.strictEqual(
+  decodeWebhook(wahaEnvelope('message.reaction', { from: 'x@c.us', reaction: { text: '👍' } }))[0]
+    .mutations,
+  undefined,
+);
+
+// --- Borrados ---
+// El id del mensaje afectado va en `before.id`; el payload NO tiene `id` en la
+// raíz, así que buscarlo ahí dejaría el parcheo sin efecto EN SILENCIO.
+const revoked = decodeWebhook(
+  wahaEnvelope('message.revoked', {
+    before: { id: 'false_521555@c.us_BBB', timestamp: 1741249702, body: 'me equivoqué' },
+    after: { id: 'false_521555@c.us_BBB', timestamp: 1741249800, body: '' },
+  }),
+);
+assert.deepStrictEqual(revoked[0].mutations, [
+  { kind: 'revoked', wamid: 'false_521555@c.us_BBB' },
+]);
+assert.deepStrictEqual(revoked[0].messages, []);
+// Sin `before` no se inventa un objetivo.
+assert.strictEqual(decodeWebhook(wahaEnvelope('message.revoked', {}))[0].mutations, undefined);
+assert.strictEqual(
+  decodeWebhook(wahaEnvelope('message.revoked', { after: { id: 'x' } }))[0].mutations,
+  undefined,
+);
+
+// --- Editados: suscrito pero SIN decodificar todavía ---
+// WAHA no publica el payload de este evento. Aterriza para poder capturar su forma
+// real; escribir un decoder a ciegas guardaría datos mal en silencio (lección @lid).
+const edited = decodeWebhook(wahaEnvelope('message.edited', { lo: 'que sea' }));
+assert.strictEqual(edited.length, 1, 'debe aterrizar como ok, no descartarse');
+assert.deepStrictEqual(edited[0].messages, []);
+assert.strictEqual(edited[0].mutations, undefined);
+// Y con payload ausente tampoco lanza.
+assert.doesNotThrow(() => decodeWebhook(wahaEnvelope('message.edited', undefined as any)));
+
 // Estado de sesión: ni mensajes ni acuses, solo sessionStatus.
 const wSess = decodeWebhook(wahaEnvelope('session.status', { status: 'SCAN_QR_CODE' }));
 assert.strictEqual(wSess[0].sessionStatus, 'SCAN_QR_CODE');
