@@ -38,6 +38,7 @@ export class WabaService {
   private readonly wahaKey: string;
   private readonly wahaSecret: string;
   private readonly wahaCallbackUrl: string;
+  private readonly fullSync: boolean;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -49,6 +50,7 @@ export class WabaService {
     this.wahaKey = config.get<string>('WAHA_API_KEY') ?? '';
     this.wahaSecret = config.get<string>('WAHA_WEBHOOK_SECRET') ?? '';
     this.wahaCallbackUrl = config.get<string>('WAHA_CALLBACK_URL') ?? '';
+    this.fullSync = config.get<string>('WAHA_FULL_SYNC') === 'true';
   }
 
   async create(tenantId: string, body: any) {
@@ -150,6 +152,9 @@ export class WabaService {
         session,
         this.wahaCallbackUrl,
         wahaHmacKey(this.wahaSecret, session),
+        // El store del engine se fija SOLO aquí: cambiarlo con la sesión ya
+        // emparejada puede costar el historial (doc de WAHA).
+        this.fullSync,
       );
     } catch (e) {
       // Sin sesión no hay conexión: no dejar la fila huérfana.

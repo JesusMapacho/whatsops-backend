@@ -13,12 +13,14 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { MessagingService, UploadedMediaFile } from './messaging.service';
 import { ConversationsService } from './conversations.service';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
+import { WahaService } from '../waha/waha.service';
 
 @Controller('conversations')
 export class ConversationsController {
   constructor(
     private readonly messaging: MessagingService,
     private readonly conversations: ConversationsService,
+    private readonly waha: WahaService,
   ) {}
 
   @Get()
@@ -53,6 +55,15 @@ export class ConversationsController {
     // Un agente solo envía en conversaciones suyas o abiertas.
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
     return this.messaging.send(user.tenantId, id, body);
+  }
+
+  // Importa los mensajes anteriores al emparejamiento de ESTA conversación.
+  // Es a demanda y por conversación, nunca un barrido de todos los chats del
+  // teléfono: ese listado incluye la vida privada del dueño.
+  @Post(':id/history')
+  async history_import(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.waha.queueHistoryImport(user.tenantId, id);
   }
 
   // Marcar leída explícitamente: el frontend la llama al llegar un mensaje con el

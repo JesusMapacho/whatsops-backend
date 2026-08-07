@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CryptoModule } from '../crypto/crypto.module';
+import { EventsModule } from '../events/events.module';
 import { WahaService, WAHA_QUEUE } from './waha.service';
 import { WahaProcessor } from './waha.processor';
 
@@ -9,6 +10,7 @@ import { WahaProcessor } from './waha.processor';
   imports: [
     PrismaModule,
     CryptoModule,
+    EventsModule,
     BullModule.registerQueue({
       name: WAHA_QUEUE,
       defaultJobOptions: {

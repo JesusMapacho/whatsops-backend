@@ -3,6 +3,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { CryptoModule } from '../crypto/crypto.module';
 import { EventsModule } from '../events/events.module';
 import { StorageModule } from '../storage/storage.module';
+import { WahaModule } from '../waha/waha.module';
 import { MessagingService } from './messaging.service';
 import { ConversationsService } from './conversations.service';
 import { CannedResponsesService } from './canned-responses.service';
@@ -11,7 +12,7 @@ import { TemplatesController } from './templates.controller';
 import { CannedResponsesController } from './canned-responses.controller';
 
 @Module({
-  imports: [PrismaModule, CryptoModule, EventsModule, StorageModule],
+  imports: [PrismaModule, CryptoModule, EventsModule, StorageModule, WahaModule],
   controllers: [ConversationsController, TemplatesController, CannedResponsesController],
   providers: [MessagingService, ConversationsService, CannedResponsesService],
   exports: [ConversationsService],

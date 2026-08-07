@@ -4,7 +4,15 @@ import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
-import { deleteSession, listSessions, restartSession, updateSessionWebhook } from './waha.client';
+import { EventsGateway } from '../events/events.gateway';
+import {
+  deleteSession,
+  fetchChatMessages,
+  listSessions,
+  restartSession,
+  updateSessionWebhook,
+} from './waha.client';
+import { toHistoryRow, usableHistory } from './waha.history';
 import {
   decideForConnection,
   orphanSessions,
@@ -24,6 +32,11 @@ const DEFAULT_INTERVAL_MS = 2 * 60 * 1000;
 // Retención de WebhookEvent procesados con éxito.
 const DEFAULT_EVENT_RETENTION_DAYS = 14;
 
+// Importación de historial: tamaño de página, pausa entre páginas y tope de páginas.
+const HISTORY_PAGE_SIZE = 50;
+const HISTORY_PAUSE_MS = 800;
+const DEFAULT_HISTORY_PAGES = 4; // 200 mensajes por conversación
+
 @Injectable()
 export class WahaService implements OnModuleInit {
   private readonly logger = new Logger(WahaService.name);
@@ -32,10 +45,13 @@ export class WahaService implements OnModuleInit {
   private readonly eventRetentionDays: number;
   private readonly callbackUrl: string;
   private readonly webhookSecret: string;
+  private readonly historyPages: number;
+  readonly fullSync: boolean;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    private readonly events: EventsGateway,
     @InjectQueue(WAHA_QUEUE) private readonly queue: Queue,
     config: ConfigService,
   ) {
@@ -47,6 +63,10 @@ export class WahaService implements OnModuleInit {
     this.eventRetentionDays = days === undefined ? DEFAULT_EVENT_RETENTION_DAYS : Number(days);
     this.callbackUrl = config.get<string>('WAHA_CALLBACK_URL') ?? '';
     this.webhookSecret = config.get<string>('WAHA_WEBHOOK_SECRET') ?? '';
+    this.historyPages = Number(config.get<string>('WAHA_HISTORY_PAGES')) || DEFAULT_HISTORY_PAGES;
+    // fullSync=true trae ~1 año en vez de ~3 meses, a cambio de bastante más
+    // trabajo al arrancar la sesión. Por defecto no.
+    this.fullSync = config.get<string>('WAHA_FULL_SYNC') === 'true';
   }
 
   // Job repeatable de BullMQ, NO setInterval: `onModuleInit` corre en cada réplica,
@@ -67,6 +87,99 @@ export class WahaService implements OnModuleInit {
     } catch (e) {
       this.logger.warn(`No se pudo programar la reconciliación: ${(e as Error).message}`);
     }
+  }
+
+  // Encola la importación del historial de UNA conversación. Los datos del job
+  // llevan SOLO ids: viven en Redis en claro, así que la api key se re-lee y
+  // descifra dentro del worker.
+  async queueHistoryImport(tenantId: string, conversationId: string) {
+    await this.queue.add('history', { tenantId, conversationId });
+    return { queued: true };
+  }
+
+  // Trae los mensajes anteriores de una conversación y los persiste.
+  //
+  // Es por conversación y NO un barrido de todos los chats del teléfono: el listado
+  // completo incluye la vida privada del dueño (familia, médico, banco), y volcarla
+  // a una bandeja de negocio es un problema de privacidad, no un detalle. Además la
+  // app se apoya en que "las conversaciones nacen de un inbound".
+  async importHistory(tenantId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, tenantId, platform: 'waha' },
+      include: { contact: true, wabaConnection: { include: { tenant: true } } },
+    });
+    if (!conv) return { imported: 0 };
+
+    // Se re-verifica AQUÍ y no al encolar: un tenant suspendido entre el encolado y
+    // la ejecución seguiría extrayendo su WhatsApp.
+    if (conv.wabaConnection.tenant.status === 'suspended') {
+      this.logger.warn(`Importación cancelada: tenant ${tenantId} suspendido.`);
+      return { imported: 0 };
+    }
+
+    const baseUrl = conv.wabaConnection.baseUrl ?? this.wahaUrl;
+    const apiKey = this.crypto.decrypt(conv.wabaConnection.accessTokenEnc);
+    const session = conv.wabaConnection.phoneNumberId;
+
+    // El más antiguo que ya tenemos marca el corte: solo se importa lo anterior.
+    const oldest = await this.prisma.message.findFirst({
+      where: { tenantId, conversationId },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+
+    let imported = 0;
+    let offset = 0;
+    for (let page = 0; page < this.historyPages; page++) {
+      const raw = await fetchChatMessages(
+        baseUrl,
+        apiKey,
+        session,
+        conv.contact.waId,
+        HISTORY_PAGE_SIZE,
+        offset,
+      );
+      if (!raw.length) break;
+      offset += raw.length;
+
+      const rows = usableHistory(raw.map(toHistoryRow), oldest?.createdAt ?? null);
+      for (const r of rows) {
+        // Idempotente por (tenant, wamid): repetir la importación no duplica.
+        try {
+          await this.prisma.message.create({
+            data: {
+              tenantId,
+              conversationId,
+              direction: r.direction,
+              type: r.type,
+              payload: r.payload as any,
+              wamid: r.wamid,
+              status: r.direction === 'in' ? 'delivered' : 'sent',
+              createdAt: r.createdAt,
+            },
+          });
+          imported++;
+        } catch (e: any) {
+          if (e?.code !== 'P2002') throw e; // ya estaba: seguir
+        }
+      }
+      if (raw.length < HISTORY_PAGE_SIZE) break;
+      // Serial y con pausa: la instancia tiene reputación compartida entre tenants,
+      // y ráfagas de llamadas se rate-limitean o se marcan.
+      await new Promise((r) => setTimeout(r, HISTORY_PAUSE_MS));
+    }
+
+    if (offset >= this.historyPages * HISTORY_PAGE_SIZE) {
+      // Nada de topes silenciosos: si se truncó, se dice.
+      this.logger.log(
+        `Historial truncado en ${offset} mensajes para la conversación ${conversationId} ` +
+          `(tope de ${this.historyPages} páginas).`,
+      );
+    }
+    // UN solo evento al final, no uno por mensaje: son cientos.
+    if (imported) this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversationId });
+    this.logger.log(`Historial importado: ${imported} mensajes en ${conversationId}.`);
+    return { imported };
   }
 
   // Purga de eventos ya procesados. Nada los limpiaba, y con `message.any` (un
@@ -129,6 +242,7 @@ export class WahaService implements OnModuleInit {
         continue;
       }
       const remoteByName = new Map(remote.map((s) => [s.name, s.status]));
+      const configByName = new Map(remote.map((s) => [s.name, s.config]));
 
       for (const conn of group) {
         const remoteStatus = remoteByName.get(conn.phoneNumberId) ?? null;
@@ -150,7 +264,14 @@ export class WahaService implements OnModuleInit {
         // común es `none` (estado coherente), y ahí también hay que re-suscribir.
         if (action.kind !== 'delete') {
           try {
-            await this.resubscribe(conn, baseUrl, apiKey, remoteStatus, summary);
+            await this.resubscribe(
+              conn,
+              baseUrl,
+              apiKey,
+              remoteStatus,
+              configByName.get(conn.phoneNumberId),
+              summary,
+            );
           } catch (e) {
             this.logger.warn(
               `No se pudo re-suscribir ${conn.phoneNumberId}: ${(e as Error).message}`,
@@ -212,6 +333,7 @@ export class WahaService implements OnModuleInit {
     baseUrl: string,
     apiKey: string,
     remoteStatus: string | null,
+    currentConfig: any,
     summary: { resubscribed: number },
   ) {
     if (!webhookNeedsUpdate(conn.webhookVersion, WAHA_EVENTS_VERSION, remoteStatus)) return;
@@ -231,6 +353,9 @@ export class WahaService implements OnModuleInit {
       conn.phoneNumberId,
       this.callbackUrl,
       wahaHmacKey(this.webhookSecret, conn.phoneNumberId),
+      // Se re-envía la config actual tal cual: el PUT la reemplaza entera, y perder
+      // el bloque `noweb` cambiaría el store de una sesión ya emparejada.
+      currentConfig,
     );
     await this.prisma.wabaConnection.update({
       where: { id: conn.id },

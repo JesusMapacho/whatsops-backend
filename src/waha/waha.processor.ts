@@ -12,7 +12,13 @@ export class WahaProcessor extends WorkerHost {
     super();
   }
 
-  async process() {
+  async process(job: { name: string; data: any }) {
+    // Dos tipos de job en la misma cola: el tick de reconciliación (repeatable) y
+    // la importación de historial de una conversación (a demanda).
+    if (job.name === 'history') {
+      return this.waha.importHistory(job.data.tenantId, job.data.conversationId);
+    }
+
     const s = await this.waha.reconcile();
     // Solo se loguea cuando hubo algo que corregir: si no, son 720 líneas al día.
     if (s.updated || s.restarted || s.deleted) {

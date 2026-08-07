@@ -46,6 +46,22 @@ export interface WahaSession {
   name: string;
   status: string;
   me: { id: string; pushName?: string } | null;
+  // Config tal como la tiene la instancia. Se conserva CRUDA porque hay que
+  // re-enviarla intacta al actualizar el webhook: el PUT reemplaza `config` entero,
+  // y perder el bloque `noweb` significaría cambiar el store de una sesión ya
+  // emparejada, que segun la doc de WAHA puede costar el historial del chat.
+  config: any;
+}
+
+// Store del engine NOWEB. Sin él, WAHA no puede listar chats ni leer mensajes
+// anteriores (`/chats`, `/chats/{id}/messages`, `/contacts/all`), así que sin esto
+// no hay import de historial ni asunto de grupo.
+//
+// OJO: la doc advierte de NO cambiar estos valores después de escanear el QR — se
+// puede perder el historial. Por eso solo se ponen al CREAR la sesión, y una sesión
+// vieja necesita re-emparejarse para tenerlo.
+export function nowebStoreConfig(fullSync: boolean) {
+  return { noweb: { store: { enabled: true, fullSync } } };
 }
 
 // Fuente de verdad para la reconciliación: qué sesiones existen de verdad y en
@@ -64,6 +80,7 @@ export async function listSessions(baseUrl: string, apiKey: string): Promise<Wah
       name: s.name,
       status: typeof s.status === 'string' ? s.status : 'UNKNOWN',
       me: s?.me?.id ? { id: s.me.id, pushName: s.me.pushName ?? undefined } : null,
+      config: s?.config ?? null,
     }));
 }
 
@@ -76,6 +93,7 @@ export async function createSession(
   session: string,
   webhookUrl: string,
   hmacKey: string,
+  fullSync = false,
 ): Promise<void> {
   await deleteSession(baseUrl, apiKey, session).catch(() => undefined);
   const res = await call(baseUrl, apiKey, '/api/sessions', 'POST', {
@@ -83,6 +101,9 @@ export async function createSession(
     start: true,
     config: {
       webhooks: [{ url: webhookUrl, events: WAHA_EVENTS, hmac: { key: hmacKey } }],
+      // El store se fija AQUÍ y nunca después: cambiarlo con la sesión ya
+      // emparejada puede costar el historial.
+      ...nowebStoreConfig(fullSync),
     },
   });
   if (!res.ok) {
@@ -104,16 +125,82 @@ export async function updateSessionWebhook(
   session: string,
   webhookUrl: string,
   hmacKey: string,
+  // Config actual de la sesión en la instancia. TODO lo que no sean webhooks se
+  // re-envía tal cual: el PUT reemplaza `config` entero, así que omitir el bloque
+  // `noweb` equivaldría a cambiar el store de una sesión ya emparejada — y eso,
+  // según la doc de WAHA, puede costar el historial del chat.
+  currentConfig?: any,
 ): Promise<void> {
   if (!webhookUrl || !hmacKey) {
     throw new Error('Falta la URL de callback o el secreto HMAC: no se re-suscribe.');
   }
+  const { webhooks: _drop, ...preserved } = currentConfig ?? {};
   const res = await call(baseUrl, apiKey, `/api/sessions/${encodeURIComponent(session)}`, 'PUT', {
     config: {
+      ...preserved,
       webhooks: [{ url: webhookUrl, events: WAHA_EVENTS, hmac: { key: hmacKey } }],
     },
   });
   if (!res.ok) throw new Error('WAHA no pudo actualizar la config de la sesión.');
+}
+
+// ¿Tiene esta sesión el store de NOWEB activo? Sin él no hay historial ni asunto
+// de grupo, y no se puede activar sin re-emparejar.
+export function hasStore(config: any): boolean {
+  return config?.noweb?.store?.enabled === true;
+}
+
+// Asunto de un grupo. No requiere el store (viene del protocolo), pero puede fallar
+// si la sesión no está lista: quien llama lo trata como opcional.
+export async function getGroupSubject(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  groupId: string,
+): Promise<string | null> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/${encodeURIComponent(session)}/groups/${encodeURIComponent(groupId)}`,
+    'GET',
+  );
+  if (!res.ok) return null;
+  const json: any = await res.json().catch(() => null);
+  const subject = json?.subject ?? json?.name;
+  return typeof subject === 'string' && subject.trim() ? subject.trim() : null;
+}
+
+// Mensajes anteriores de un chat. EXIGE el store del engine NOWEB.
+// `downloadMedia=false` a propósito: importar binarios de meses de historial es
+// desproporcionado; esos mensajes quedan sin adjunto.
+export async function fetchChatMessages(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+  chatId: string,
+  limit: number,
+  offset: number,
+): Promise<any[]> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/messages` +
+      `?limit=${limit}&offset=${offset}&downloadMedia=false`,
+    'GET',
+  );
+  if (!res.ok) {
+    const json: any = await res.json().catch(() => ({}));
+    // WAHA responde 400 con un mensaje explícito cuando falta el store.
+    const m = typeof json?.message === 'string' ? json.message : '';
+    if (/store/i.test(m)) {
+      throw new Error(
+        'Esta sesión no tiene el historial habilitado. Vuelve a conectar el número para activarlo.',
+      );
+    }
+    throw new Error('WAHA no pudo leer los mensajes anteriores.');
+  }
+  const json: any = await res.json().catch(() => null);
+  return Array.isArray(json) ? json : [];
 }
 
 export async function deleteSession(
