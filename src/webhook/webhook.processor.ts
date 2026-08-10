@@ -12,6 +12,7 @@ import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './
 import { applyReaction } from './mutations';
 import { fetchPayloadBinary, wahaMediaUrl } from '../waha/waha.url';
 import { openConversation, resolveContact } from '../messaging/contact-resolve';
+import { addToSystemList } from '../contacts/system-list';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -127,6 +128,17 @@ export class WebhookProcessor extends WorkerHost {
       wabaConnectionId: conn.id,
       inbound: direction === 'in',
     });
+
+    // Cartera de clientes (feature 30): quien nos escribe entra solo en la cartera de
+    // sistema. Solo con ENTRANTES, y eso ES la regla de reciprocidad — el eco de lo que
+    // el dueño manda desde su teléfono no convierte a nadie en cliente.
+    //
+    // Mejor esfuerzo: `addToSystemList` se traga sus propios errores y nunca lanza. No
+    // anotar a alguien en una lista no puede costar el mensaje de un cliente, que es lo
+    // único que el producto promete no perder.
+    if (direction === 'in') {
+      await addToSystemList(this.prisma, tenantId, contact.id, msg.isGroup);
+    }
 
     // Red de seguridad de la duplicación: si el envío por la app no consiguió el
     // wamid de la respuesta del proveedor, su fila quedó con wamid null y el eco no

@@ -146,11 +146,27 @@ export class ContactListsService {
   }
 
   async removeMember(tenantId: string, actor: Actor, id: string, contactId: string) {
-    await this.mustManage(tenantId, actor, id);
+    const list = await this.mustManage(tenantId, actor, id);
     await this.prisma.contactListMember.deleteMany({
       where: { contactListId: id, contactId },
     });
-    return { removed: true };
+    // Se permite sacar a alguien de la cartera de sistema, pero se DICE la verdad: el
+    // worker lo vuelve a meter en cuanto escriba otra vez.
+    //
+    // ponytail: no se guarda una lista de exclusiones. Techo conocido: sacar a alguien
+    // de "Todos" no es permanente. Upgrade cuando alguien lo pida de verdad: una columna
+    // `excluded` en el miembro que el worker respete. Mientras tanto, excluir se hace
+    // enviando desde una cartera curada, que es para lo que existen.
+    return {
+      removed: true,
+      volveraSiEscribe: list.isSystem,
+      ...(list.isSystem
+        ? {
+            aviso:
+              'Volverá a entrar en esta cartera si te escribe otra vez. Para excluirlo de los envíos, manda desde una cartera aparte.',
+          }
+        : {}),
+    };
   }
 
   // Reemplaza los accesos de la cartera. Se validan los roles contra el tenant: un
