@@ -84,6 +84,24 @@ export async function listSessions(baseUrl: string, apiKey: string): Promise<Wah
     }));
 }
 
+// El propio número de la sesión (`me.id`, p. ej. `5218716458297@c.us`).
+// `null` si la sesión no está emparejada o no se pudo leer.
+export async function sessionMeId(
+  baseUrl: string,
+  apiKey: string,
+  session: string,
+): Promise<string | null> {
+  const res = await call(
+    baseUrl,
+    apiKey,
+    `/api/sessions/${encodeURIComponent(session)}`,
+    'GET',
+  ).catch(() => null);
+  if (!res?.ok) return null;
+  const json: any = await res.json().catch(() => null);
+  return typeof json?.me?.id === 'string' && json.me.id ? json.me.id : null;
+}
+
 // Crea (o recrea) la sesión ya arrancada, con su webhook y su HMAC derivado.
 // Borra antes: un POST sobre una sesión existente da 422, y recrear garantiza
 // que el emparejamiento arranca limpio.

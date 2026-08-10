@@ -6,6 +6,7 @@ import { StorageService } from '../storage/storage.service';
 import { channelAdapter } from './channels';
 import { UploadedMediaFile } from './messaging.service';
 import { isVoiceMime, validateMedia } from './media.util';
+import { checkNumberExists, sessionMeId } from '../waha/waha.client';
 
 // Publicar estados ("historias") en el WhatsApp del negocio.
 //
@@ -19,6 +20,9 @@ import { isVoiceMime, validateMedia } from './media.util';
 // holgado, más que nada contra bucles.
 const DEFAULT_MAX_PER_DAY = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Destinatarios concretos por estado. Cada uno cuesta una consulta para resolver su
+// chatId canónico; para audiencias grandes está "todos", que no consulta nada.
+const MAX_CONTACTS = 200;
 
 // Los estados de vídeo y voz tienen requisitos de formato que WhatsApp no negocia
 // (mp4/h264 y ogg/opus), y WAHA transcodifica si se le pide — el mismo `convert: true`
@@ -103,11 +107,21 @@ export class StatusService {
         'Elige a quién: unos contactos, o marca explícitamente "todos mis contactos".',
       );
     }
+    // Tope: cada destinatario cuesta una consulta al proveedor para resolver su
+    // canónico. Quien quiera publicar a cientos usa "todos", que no consulta nada.
+    if (contacts.length > MAX_CONTACTS) {
+      throw new BadRequestException(
+        `Máximo ${MAX_CONTACTS} contactos por estado. Para más, usa "todos mis contactos".`,
+      );
+    }
 
     const kind = this.kindOf(file);
+    // Resolver ANTES de subir el media: si un número no existe, mejor fallar sin
+    // haber guardado una copia del archivo que nadie va a ver.
+    const audiencia = all ? [] : await this.withOwner(conn, await this.resolveAudience(conn, contacts));
     const payload: Record<string, unknown> = {
       session: conn.phoneNumberId,
-      ...(all ? {} : { contacts }),
+      ...(all ? {} : { contacts: audiencia }),
     };
 
     let mediaKey: string | null = null;
@@ -158,6 +172,10 @@ export class StatusService {
       throw new BadRequestException('No se pudo contactar al proveedor de mensajería.');
     }
     if (!res.ok) throw new BadRequestException(adapter.mapError(json));
+    // El id que devuelve WAHA es lo único que permite luego cruzar un estado con lo
+    // que se ve (o no se ve) en el teléfono. Sin esto, "no aparece" no se puede
+    // depurar sin leer los logs del contenedor.
+    this.logger.log(`WAHA aceptó el estado ${kind}: ${JSON.stringify(json).slice(0, 200)}`);
 
     const post = await this.prisma.statusPost.create({
       data: {
@@ -178,6 +196,85 @@ export class StatusService {
     return { ...post, mediaUrl: mediaKey ? this.storage.signedUrl(mediaKey) : null };
   }
 
+  // Convierte lo que escribió el operador en chatIds CANÓNICOS preguntándoselos al
+  // proveedor, uno por uno.
+  //
+  // Es el mismo `check-exists` de la fase 4, y aquí es todavía más necesario: un
+  // mensaje mal dirigido devuelve un error de Meta o de WAHA, pero un ESTADO mal
+  // dirigido devuelve 201 y simplemente no lo ve nadie. Sin esta resolución, publicar
+  // a contactos concretos falla en silencio para cualquier número mexicano o argentino
+  // escrito como se marca.
+  //
+  // Un número que no existe se RECHAZA con su nombre en el mensaje: publicar a medias
+  // sin decir a quién no llegó es peor que no publicar.
+  private async resolveAudience(
+    conn: { baseUrl: string | null; phoneNumberId: string; accessTokenEnc: string },
+    entries: string[],
+  ): Promise<string[]> {
+    const baseUrl = conn.baseUrl ?? this.wahaUrl;
+    const apiKey = this.crypto.decrypt(conn.accessTokenEnc);
+    const out: string[] = [];
+    const noExisten: string[] = [];
+    for (const entry of entries) {
+      // Un chatId ya formado se respeta: quien lo pasa ya sabe lo que hace.
+      if (entry.includes('@')) {
+        out.push(entry);
+        continue;
+      }
+      const check = await checkNumberExists(baseUrl, apiKey, conn.phoneNumberId, entry).catch(
+        () => null,
+      );
+      if (check && !check.exists) {
+        noExisten.push(entry);
+        continue;
+      }
+      // Sin comprobación posible no se inventa nada: se usa lo escrito y se avisa.
+      if (!check?.chatId) {
+        this.logger.warn(`No se pudo resolver ${entry}: el estado puede no llegarle.`);
+        out.push(`${entry}@c.us`);
+        continue;
+      }
+      out.push(check.chatId);
+    }
+    if (noExisten.length) {
+      throw new BadRequestException(
+        `Estos números no tienen WhatsApp: ${noExisten.join(', ')}. Quítalos y vuelve a intentarlo.`,
+      );
+    }
+    return [...new Set(out)];
+  }
+
+  // Mete el PROPIO número de la sesión en la lista de destinatarios.
+  //
+  // Dos razones, y la primera es un bug observado. WAHA trocea los destinatarios en
+  // lotes de tamaño `contacts.length`, pero antes de trocear AÑADE el número del
+  // dueño a la lista. O sea que con N contactos hay N+1 destinatarios en lotes de N:
+  // siempre sobra uno y el estado se envía DOS VECES, con el mismo id de mensaje.
+  // Verificado en los logs de la instancia: `to 2 participants, chunks: 2, size: 1`.
+  // Mandando el dueño nosotros, `contacts.length` ya cuadra con la lista real y sale
+  // en un solo lote.
+  //
+  // Segunda razón: el dueño tiene que estar en la audiencia para poder COMPROBAR que
+  // se publicó. Un estado que el que lo publica no ve es indistinguible de uno que
+  // falló.
+  private async withOwner(
+    conn: { baseUrl: string | null; phoneNumberId: string; accessTokenEnc: string },
+    contacts: string[],
+  ): Promise<string[]> {
+    const me = await sessionMeId(
+      conn.baseUrl ?? this.wahaUrl,
+      this.crypto.decrypt(conn.accessTokenEnc),
+      conn.phoneNumberId,
+    ).catch(() => null);
+    if (!me) {
+      // Sin el propio número seguimos publicando: WAHA lo añade igual, solo que con
+      // el lote descuadrado. Mejor un envío duplicado que no publicar.
+      this.logger.warn('No se pudo leer el número de la sesión: el estado irá en dos lotes.');
+      return contacts;
+    }
+    return contacts.includes(me) ? contacts : [me, ...contacts];
+  }
+
   // El tipo se deriva del ARCHIVO, no de lo que declare el cliente: creerle es cómo
   // un vídeo acaba publicándose por la ruta de imagen.
   private kindOf(file?: UploadedMediaFile): StatusKind {
@@ -190,7 +287,14 @@ export class StatusService {
   }
 }
 
-// Destinatarios de un estado, como los quiere WAHA: chatIds (`<dígitos>@c.us`).
+// Trocea lo que escribió el operador en entradas sueltas: teléfonos en dígitos, o
+// chatIds ya formados (que se respetan tal cual).
+//
+// OJO con lo que este parser NO hace: NO fabrica el chatId pegando `@c.us` a los
+// dígitos. Fabricarlo era un bug real — en México el número que se marca (`52 871…`)
+// no es el `wa_id` (`521871…`), así que el estado salía dirigido a un destinatario
+// que NO EXISTE: WAHA lo aceptaba, WhatsApp devolvía 201 y nadie lo veía nunca.
+// El canónico lo da el proveedor (`resolveAudience`), no la aritmética.
 export function parseContacts(raw: unknown): string[] {
   const items = Array.isArray(raw)
     ? raw.map((c) => String(c))
@@ -199,9 +303,8 @@ export function parseContacts(raw: unknown): string[] {
         .map((s) => s.trim());
   const out = items
     .filter(Boolean)
-    // Un chatId ya formado se respeta; un teléfono a secas se convierte.
-    .map((c) => (c.includes('@') ? c : `${c.replace(/\D/g, '')}@c.us`))
-    .filter((c) => c !== '@c.us');
+    .map((c) => (c.includes('@') ? c : c.replace(/\D/g, '')))
+    .filter(Boolean);
   // Sin duplicados: publicar dos veces al mismo contacto no hace nada, pero infla el
   // recuento de audiencia que queda en el registro.
   return [...new Set(out)];
