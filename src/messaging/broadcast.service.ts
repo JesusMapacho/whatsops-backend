@@ -10,6 +10,7 @@ import { decideRecipient, maxRecipients, MAX_CONSECUTIVE_FAILURES, sendIntervalM
 import { canSend, LifecycleConfig, lifecycleFromEnv } from './lifecycle';
 import { ContactListsService } from '../contacts/contact-lists.service';
 import { Actor } from '../contacts/access';
+import { pickSelected } from '../contacts/pick';
 
 export const BROADCAST_QUEUE = 'broadcast';
 
@@ -30,6 +31,7 @@ interface Fuente {
   duplicates: number;
   excluidos: BroadcastRow[];
 }
+
 
 @Injectable()
 export class BroadcastService {
@@ -57,6 +59,9 @@ export class BroadcastService {
   async preview(tenantId: string, actor: Actor, body: any) {
     const listId = typeof body?.contactListId === 'string' ? body.contactListId : '';
     if (listId) {
+      // Se pasa el body entero para que la previsualización respete la SELECCIÓN: sin
+      // eso mostraría el recuento de la cartera completa y volvería a haber dos números
+      // distintos en pantalla, que es lo que hacía parecer que estaba mal.
       const { recipients, excluidos } = await this.fromList(tenantId, actor, listId, body);
       return {
         count: recipients.length,
@@ -129,9 +134,15 @@ export class BroadcastService {
       );
     }
 
-    // Confirmación con RECUENTO, no un "¿seguro?". El operador teclea cuántos cree
-    // que son; si no cuadra, el archivo no es el que pensaba.
-    if (body?.confirmCount !== recipients.length) {
+    // Confirmación con RECUENTO, y SOLO para el CSV. Existe para cazar el desastre
+    // realista de un archivo: "quería subir 12 números y tenía 1200".
+    //
+    // Desde una cartera NO se pide, y no es un descuido: el operador elige personas de
+    // una lista que está viendo, así que la clase de error que este freno atrapa
+    // desaparece por construcción. Pedirlo además obligaba a teclear un número que el
+    // servidor calcula (descuenta a quien está en enfriamiento), o sea distinto del que
+    // la pantalla mostraba al lado de la cartera. Eso no era un freno, era una trampa.
+    if (!listId && body?.confirmCount !== recipients.length) {
       throw new BadRequestException(
         `Confirma el número de destinatarios: son ${recipients.length}` +
           (duplicates ? ` (${duplicates} repetidos se descartaron).` : '.'),
@@ -261,7 +272,11 @@ export class BroadcastService {
   ): Promise<Fuente> {
     // `usableMembers` comprueba el acceso por rol: si el operador no puede usar la
     // cartera, aquí lanza y no hay envío.
-    const miembros = await this.lists.usableMembers(tenantId, actor, listId);
+    const todos = await this.lists.usableMembers(tenantId, actor, listId);
+    // Selección explícita de personas dentro de la cartera. Los ids se validan contra
+    // los miembros: sin eso, `contactIds` sería una forma de escribirle a CUALQUIER
+    // contacto del tenant pasando por encima de la regla de la cartera.
+    const miembros = pickSelected(todos, body?.contactIds);
     // Desde una cartera las variables de plantilla son las MISMAS para todos: no hay
     // columnas de dónde sacar una por persona. Se escriben una vez.
     const vars: string[] = Array.isArray(body?.params)

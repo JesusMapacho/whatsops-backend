@@ -10,6 +10,7 @@ import { checkNumberExists, sessionMeId } from '../waha/waha.client';
 import { ContactListsService } from '../contacts/contact-lists.service';
 import { Actor } from '../contacts/access';
 import { isCanonicalWaId } from './contact-resolve';
+import { pickSelected } from '../contacts/pick';
 
 // Publicar estados ("historias") en el WhatsApp del negocio.
 //
@@ -117,7 +118,9 @@ export class StatusService {
     const listId = typeof body?.contactListId === 'string' ? body.contactListId : '';
     const all = body?.all === true || body?.all === 'true';
     const contacts = listId
-      ? (await this.lists.usableMembers(tenantId, actor, listId)).map(audienceIdOf)
+      ? pickSelected(await this.lists.usableMembers(tenantId, actor, listId), body?.contactIds).map(
+          audienceIdOf,
+        )
       : parseContacts(body?.contacts);
     if (!all && !contacts.length) {
       throw new BadRequestException(
