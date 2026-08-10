@@ -195,6 +195,17 @@ assert.strictEqual(waha.supportsColdOutreach, true);
 // Y el que no tiene ventana es el único al que los topes en frío contienen de verdad.
 assert.ok(waha.paced && !waha.enforcesWindow);
 
+// El ciclo de prospección es de los canales SIN ventana de Meta. En los de Meta la
+// regla ya es suya (ventana + plantillas) y mezclar las dos sería tener dos frenos
+// discrepando sobre el mismo envío.
+assert.strictEqual(waha.coldLifecycle, true);
+assert.ok(!wa.coldLifecycle, 'Cloud API ya tiene su ventana: el ciclo propio no aplica');
+assert.ok(!msn.coldLifecycle);
+// Y son excluyentes por construcción: ningún adaptador lleva los dos.
+for (const a of [wa, msn, ig, waha]) {
+  assert.ok(!(a.enforcesWindow && a.coldLifecycle), 'ventana de Meta y ciclo propio se excluyen');
+}
+
 // --- Estados / historias (feature 29 fase 7) ---
 // Ventaja real del canal por QR: la API oficial de Meta NO puede publicar estados
 // (el Cloud API es de mensajería; los estados son función de consumidor).

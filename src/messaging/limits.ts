@@ -9,9 +9,15 @@
 //
 // OJO: hasta la feature 29 la regla "nunca inicies conversación" se cumplía
 // ESTRUCTURALMENTE, porque las Conversation solo nacían de un inbound. Eso ya NO es
-// cierto: ahora se puede escribir primero. El invariante estructural se sustituye por
-// topes explícitos de PRIMER CONTACTO (ver isCold y los campos maxCold*), que son la
-// única cosa que impide juntar las 5-10 marcas de spam que banean un número.
+// cierto: ahora se puede escribir primero.
+//
+// Y desde la feature 30 este módulo YA NO decide la insistencia sobre UNA persona. Eso
+// se movió a `lifecycle.ts` (espera de 7 días, tope de 2 intentos, ventana de 24 h tras
+// la primera respuesta), porque una regla por conversación no cabe en una función cuyos
+// conteos son del tenant. La división quedó así, y conviene no volver a mezclarla:
+//   · lifecycle.ts → ¿puedo escribirle a ESTA persona ahora? (consentimiento y ritmo)
+//   · limits.ts    → ¿cuánto puede mandar este TENANT en total? (volumen y cupo)
+// Los dos se evalúan; ninguno sustituye al otro.
 
 export interface LimitConfig {
   // Salientes por hora al MISMO contacto. Def. 4, de la guía de WAHA.
@@ -114,15 +120,14 @@ export function checkLimits(
     if (opts.isGroup) {
       return { allowed: false, message: 'No se puede iniciar un grupo en frío.' };
     }
-    // Un solo mensaje por desconocido, sin ventana de tiempo. Es la regla que de
-    // verdad evita juntar las 5-10 marcas de spam que banean un número.
-    if (counts.coldConversationOut > 0) {
-      return {
-        allowed: false,
-        message:
-          'Ya le escribiste y todavía no ha contestado. Espera su respuesta antes de volver a insistir.',
-      };
-    }
+    // AQUÍ ESTABA "un solo mensaje por desconocido, para siempre". Se retiró en la
+    // feature 30: era seguro pero inutilizaba la prospección. Lo sustituye el ciclo de
+    // vida de `lifecycle.ts` (espera de 7 días y tope de 2 intentos), que se evalúa
+    // ANTES de llegar aquí y por conversación. Este módulo se queda con lo que de
+    // verdad es suyo: el volumen por TENANT.
+    //
+    // `coldConversationOut` sigue en la entrada porque es el contador de intentos que
+    // alimenta ese ciclo — no se ha quedado sin uso, ha cambiado de dueño.
     const paid = plan !== 'free';
     const perHour = paid ? cfg.maxColdPerHourPaid : cfg.maxColdPerHour;
     const perDay = paid ? cfg.maxColdPerDayPaid : cfg.maxColdPerDay;

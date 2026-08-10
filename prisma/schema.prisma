@@ -449,6 +449,18 @@ model Conversation {
   assignedUserId   String?
   lastInboundAt    DateTime?
   lastReadAt       DateTime?
+  // ¿La abrimos NOSOTROS escribiendo primero? (v5 feature 30)
+  //
+  // Hace falta y no es derivable: en cuanto el contacto contesta, una conversación que
+  // abrimos nosotros y una que abrió él son indistinguibles (las dos tienen entrante y
+  // saliente). Y derivarlo de "la dirección del mensaje más antiguo" NO es estable: el
+  // import de historial (feature 28) inserta mensajes más viejos que el primero y
+  // voltearía la respuesta.
+  //
+  // Solo las conversaciones con esto en true entran en el ciclo de vida de
+  // prospección: atender a quien nos buscó no lleva ventana ni enfriamiento, o un
+  // agente se quedaría bloqueado contestando a un cliente de hace tres días.
+  initiatedByUs    Boolean            @default(false)
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 

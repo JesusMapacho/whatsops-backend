@@ -34,6 +34,13 @@ export interface ChannelAdapter {
   // un PSID/IGSID, y este adaptador tampoco soporta plantillas. Rechazarlo aquí evita
   // crear una conversación que jamás podría enviar nada.
   supportsColdOutreach: boolean;
+  // ¿Aplica el ciclo de vida de prospección propio (lifecycle.ts)?
+  //
+  // Es para los canales SIN ventana de Meta: ahí no hay nada que obligue a esperar una
+  // respuesta, así que el ritmo lo pone este ciclo. En los canales de Meta la regla ya
+  // es suya (`enforcesWindow` + plantillas) y no se toca — mezclar las dos sería tener
+  // dos frenos discrepando sobre el mismo envío.
+  coldLifecycle?: boolean;
   // ¿Se pueden publicar estados (las "historias" de WhatsApp)?
   //
   // Ventaja real del canal por QR: la API oficial de Meta **no puede hacerlo**. El
@@ -185,6 +192,10 @@ const waha: ChannelAdapter = {
   // Técnicamente sí, y por eso los topes en frío son lo único que lo contiene: aquí
   // no hay ventana ni plantillas que obliguen a nada.
   supportsColdOutreach: true,
+  // Este canal no tiene ventana ni plantillas de Meta, así que lo que contiene la
+  // prospección es el ciclo de vida propio (lifecycle.ts). Solo aplica a las
+  // conversaciones que abrimos nosotros: atender a quien nos buscó sigue libre.
+  coldLifecycle: true,
   supportsStatus: true,
   // NOWEB publica pero NO borra (borrar es solo WEBJS/WPP). Si algún día se cambia
   // de engine, esta línea es lo único que hay que tocar.

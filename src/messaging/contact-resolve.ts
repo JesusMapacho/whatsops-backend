@@ -187,6 +187,9 @@ export async function openConversation(
       wabaConnectionId,
       status: 'open',
       ...(inbound ? { lastInboundAt: new Date() } : {}),
+      // Este es el ÚNICO sitio donde nacen conversaciones, así que es el único donde se
+      // puede saber quién la abrió. Después de la primera respuesta ya no se distingue.
+      initiatedByUs: !inbound,
     },
   });
 }

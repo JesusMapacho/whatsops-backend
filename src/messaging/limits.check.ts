@@ -90,11 +90,15 @@ assert.strictEqual(isCold(new Date('2020-01-01')), false);
 // Un primer contacto pasa.
 assert.ok(checkLimits(base, cfg, 'free', cold).allowed);
 
-// Un SEGUNDO mensaje al mismo desconocido, no. Sin ventana de tiempo: es la regla que
-// de verdad evita juntar las 5-10 marcas de spam que banean un número.
-const insiste = checkLimits({ ...base, coldConversationOut: 1 }, cfg, 'free', cold);
-assert.ok(!insiste.allowed);
-assert.ok(!insiste.allowed && /no ha contestado/.test(insiste.message));
+// CAMBIO DE DUEÑO (feature 30): un segundo mensaje al mismo desconocido ya NO se
+// bloquea aquí. La insistencia sobre UNA persona la decide `lifecycle.ts` (espera de 7
+// días y tope de 2 intentos) y se comprueba antes; este módulo se queda con el volumen
+// por TENANT, que es lo que sus conteos pueden ver. Ver lifecycle.check.ts para el
+// freno en sí — no se ha perdido, se ha movido.
+assert.ok(checkLimits({ ...base, coldConversationOut: 1 }, cfg, 'free', cold).allowed);
+// Y sigue siendo OBLIGATORIO traer el conteo en frío: es el contador de intentos que
+// alimenta el ciclo, así que un cold sin él sigue siendo un error de programación.
+assert.throws(() => checkLimits({ ...base, coldConversationOut: undefined }, cfg, 'free', cold));
 
 // Topes de conversaciones nuevas por hora y por día (gratis).
 assert.ok(!checkLimits({ ...base, coldTenantHour: 5 }, cfg, 'free', cold).allowed);
@@ -119,12 +123,13 @@ assert.ok(!grupoFrio.allowed && /grupo/.test(grupoFrio.message));
 // El ritmo en caliente NO aplica a un primer contacto: por definición no hay historial.
 assert.ok(checkLimits({ ...base, contactLastHour: 99 }, cfg, 'free', cold).allowed);
 
-// Precedencia: gana el mensaje más específico y accionable.
-const todos = checkLimits(
+// Precedencia entre los topes que SIGUEN siendo de este módulo: gana el más específico
+// y accionable, o sea el de la hora antes que el del día.
+const topes = checkLimits(
   { ...base, coldConversationOut: 1, coldTenantHour: 99, coldTenantDay: 99 },
   cfg, 'free', cold,
 );
-assert.ok(!todos.allowed && /no ha contestado/.test(todos.message));
+assert.ok(!topes.allowed && /por hora/.test(topes.message));
 
 // Faltar los conteos en frío es un error de programación, no un "permitido".
 assert.throws(

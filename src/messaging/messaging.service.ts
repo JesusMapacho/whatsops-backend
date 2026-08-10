@@ -39,6 +39,7 @@ import {
   limitsFromEnv,
 } from './limits';
 import { coldWaId, openConversation, parsePhone, resolveContact } from './contact-resolve';
+import { canSend, LifecycleConfig, lifecycleFromEnv } from './lifecycle';
 import { StorageService } from '../storage/storage.service';
 import {
   checkNumberExists,
@@ -75,6 +76,9 @@ export class MessagingService {
   // Instancia WAHA gestionada. Una conexión con `baseUrl` propio (BYO) la pisa.
   private readonly wahaUrl: string;
   private readonly limits: LimitConfig;
+  // Ciclo de vida de prospección. Va aparte de `limits` a propósito: uno decide si se
+  // puede escribir a ESTA persona ahora, el otro cuánto puede mandar el tenant en total.
+  private readonly lifecycle: LifecycleConfig;
   // La feature entra APAGADA. Escribir a desconocidos arriesga el número del tenant
   // (y en la capa gratuita la reputación de la instancia compartida), así que se
   // enciende a conciencia por despliegue, no por defecto.
@@ -93,6 +97,7 @@ export class MessagingService {
     this.publicBaseUrl = config.get<string>('PUBLIC_BASE_URL') ?? '';
     this.wahaUrl = config.get<string>('WAHA_URL') ?? '';
     this.limits = limitsFromEnv((k) => config.get<string>(k));
+    this.lifecycle = lifecycleFromEnv((k) => config.get<string>(k));
     this.coldEnabled = config.get<string>('COLD_OUTREACH_ENABLED') === 'true';
   }
 
@@ -460,9 +465,16 @@ export class MessagingService {
   private async assertWithinLimits(
     adapter: ChannelAdapter,
     tenantId: string,
-    conv: { id: string; contactId: string; lastInboundAt: Date | null },
+    conv: { id: string; contactId: string; lastInboundAt: Date | null; initiatedByUs?: boolean },
     isGroup = false,
   ) {
+    // Ciclo de vida de prospección: solo en canales sin ventana de Meta y solo en las
+    // conversaciones que ABRIMOS NOSOTROS. Atender a quien nos buscó no lleva ventana ni
+    // enfriamiento: si lo llevara, un agente se quedaría bloqueado contestando a un
+    // cliente que escribió hace tres días, que es la operación normal de soporte.
+    if (adapter.coldLifecycle && conv.initiatedByUs && !isGroup) {
+      await this.assertLifecycle(conv);
+    }
     const cold = isCold(conv.lastInboundAt);
     // El ritmo *en caliente* sigue siendo solo de WAHA (en los canales de Meta ya
     // limita Meta). El cupo en FRÍO aplica a los dos transportes.
@@ -534,6 +546,43 @@ export class MessagingService {
         );
       }
     }
+  }
+
+  // Etapa del contacto y veredicto. Los intentos y el reloj del enfriamiento se
+  // DERIVAN de los salientes de la conversación: no hay columna de estado que pueda
+  // quedar desincronizada.
+  //
+  // Falla CERRADO, como el resto del camino en frío: si no se puede leer el historial,
+  // no se insiste. Nadie está esperando este mensaje.
+  private async assertLifecycle(conv: { id: string; lastInboundAt: Date | null }) {
+    let outCount: number;
+    let lastOutAt: Date | null;
+    try {
+      const [count, ultimo] = await Promise.all([
+        this.prisma.message.count({
+          where: { conversationId: conv.id, direction: 'out' },
+        }),
+        this.prisma.message.findFirst({
+          where: { conversationId: conv.id, direction: 'out' },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true },
+        }),
+      ]);
+      outCount = count;
+      lastOutAt = ultimo?.createdAt ?? null;
+    } catch (e) {
+      this.logger.warn(`No se pudo evaluar el ciclo del contacto: ${(e as Error).message}`);
+      throw new HttpException(
+        'No se pudo comprobar si puedes escribirle. Inténtalo en un momento.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    const verdict = canSend(
+      { lastInboundAt: conv.lastInboundAt, outCount, lastOutAt, now: new Date() },
+      this.lifecycle,
+    );
+    // 429 y no 400: es un límite de ritmo, y el cliente ya distingue ese código.
+    if (!verdict.ok) throw new HttpException(verdict.message, HttpStatus.TOO_MANY_REQUESTS);
   }
 
   // ¿Cabe UNA conversación nueva en frío más? Para el envío masivo, que necesita el
