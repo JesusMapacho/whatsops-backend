@@ -8,7 +8,9 @@ import {
   buildConversationWhere,
   conversationScopeWhere,
   INBOX_TAKE,
+  LAST_MESSAGE_SELECT,
   parseStatus,
+  shapeConversationRow,
 } from './conversations.util';
 import { MessagingService } from './messaging.service';
 
@@ -32,10 +34,23 @@ export class ConversationsService {
   // Emite `conversation:updated` para que la lista de otras pestañas/agentes
   // refresque su contador en vez de esperar a un refetch.
   async markRead(tenantId: string, id: string) {
-    const { count } = await this.prisma.conversation.updateMany({
-      where: { id, tenantId },
-      data: { lastReadAt: new Date() },
-    });
+    // SQL crudo a propósito: leer NO es actividad de la conversación. Con
+    // `updateMany`, el `@updatedAt` del modelo tocaría `updatedAt`, y como la
+    // bandeja ordena por ese campo, abrir un hilo lo catapultaba al principio de
+    // la lista y reordenaba todo bajo el cursor solo por mirarlo.
+    //
+    // El `AT TIME ZONE 'UTC'` NO es adorno. Las columnas son TIMESTAMP **sin zona** y
+    // Prisma guarda ahí siempre hora UTC. Cualquier valor con zona (`NOW()`, o un
+    // `Date` pasado como parámetro, que viaja como timestamptz) lo convierte Postgres
+    // usando la zona de la SESIÓN al meterlo en la columna: con la base en
+    // America/Mexico_City el `lastReadAt` se guardaba 6 h por detrás y los mensajes
+    // recientes seguían contando como no leídos para siempre.
+    //
+    // Verificado contra la base: sin esto queda 17:16 donde el resto del sistema
+    // escribe 23:16.
+    const count = await this.prisma.$executeRaw`
+      UPDATE "Conversation" SET "lastReadAt" = NOW() AT TIME ZONE 'UTC'
+      WHERE id = ${id} AND "tenantId" = ${tenantId}`;
     if (!count) return { read: false };
 
     // Mejor esfuerzo, con catch OBLIGATORIO: una promesa rechazada sin manejar
@@ -61,6 +76,11 @@ export class ConversationsService {
       include: {
         contact: true,
         assignedUser: { select: { id: true, email: true } },
+        // La última línea de cada hilo, para la previsualización de la bandeja. Va
+        // como relación anidada y no como query aparte: Prisma la resuelve con la
+        // misma llamada. Se manda el mensaje crudo, no un texto ya renderizado, para
+        // que el cliente lo pinte con las mismas reglas que usa en el hilo.
+        messages: { orderBy: { createdAt: 'desc' }, take: 1, select: LAST_MESSAGE_SELECT },
       },
       orderBy: { updatedAt: 'desc' },
       take: INBOX_TAKE,
@@ -82,7 +102,9 @@ export class ConversationsService {
       : [];
     const unread = new Map(rows.map((r) => [r.conversationId, Number(r.unread)]));
 
-    return convs.map((c) => ({ ...c, unread: unread.get(c.id) ?? 0 }));
+    return convs.map((c) =>
+      shapeConversationRow(c, unread.get(c.id) ?? 0, (k) => this.storage.signedUrl(k)),
+    );
   }
 
   // Lanza si la conversación no existe o el agente no puede acceder (no es suya ni abierta).

@@ -383,6 +383,11 @@ model Contact {
   // Chat de grupo (`@g.us`). El "contacto" es entonces el grupo, y el autor de
   // cada mensaje va en `Message.payload.author`.
   isGroup   Boolean  @default(false)
+  // Foto de perfil ya descargada, guardada en el storage. Se refresca sola cada vez
+  // que se abre el hilo (que es cuando ya se pedía a WAHA), y así la bandeja puede
+  // pintarla sin una petición por fila: bajarla al vuelo para 200 conversaciones
+  // sería justo el patrón de automatización que hace que baneen el número.
+  avatarKey String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

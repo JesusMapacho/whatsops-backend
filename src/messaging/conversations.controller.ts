@@ -70,13 +70,24 @@ export class ConversationsController {
     return this.messaging.send(user.tenantId, id, body);
   }
 
-  // Foto de perfil del contacto, en base64. Se cachea en el navegador un día: no
-  // vale la pena volver a pedirla a WhatsApp en cada apertura del hilo.
-  @Get(':id/avatar')
-  @Header('Cache-Control', 'private, max-age=86400')
-  async avatar(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+  // Refresco de lo que WhatsApp sabe del chat: foto (en base64, y guardada para que
+  // la bandeja no tenga que pedirla) y asunto del grupo. Se llama al abrir el hilo.
+  //
+  // Sin caché: es justo la llamada que sirve para detectar que la foto o el nombre
+  // del grupo cambiaron. La foto que se pinta de inmediato viene de la lista.
+  @Get(':id/profile')
+  @Header('Cache-Control', 'no-store')
+  async profile(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
-    return this.messaging.contactAvatar(user.tenantId, id);
+    return this.messaging.contactProfile(user.tenantId, id);
+  }
+
+  // Renombrar el contacto del hilo. Pensado sobre todo para grupos, cuyo nombre
+  // automático es el id: aquí se le pone uno que el equipo pueda reconocer.
+  @Patch(':id/contact')
+  async rename(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+    await this.conversations.assertAccess(user.tenantId, id, user.userId, user.role);
+    return this.messaging.renameContact(user.tenantId, id, body?.name);
   }
 
   // Importa los mensajes anteriores al emparejamiento de ESTA conversación.

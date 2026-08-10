@@ -79,6 +79,43 @@ export function buildConversationWhere(
   }
 }
 
+// Campos del último mensaje que la lista necesita para pintar la previsualización.
+// Se traen con `take: 1` dentro de la misma query, no en una segunda ronda.
+export const LAST_MESSAGE_SELECT = {
+  id: true,
+  conversationId: true,
+  direction: true,
+  type: true,
+  payload: true,
+  wamid: true,
+  status: true,
+  deletedAt: true,
+  createdAt: true,
+} as const;
+
+/**
+ * Aplana una fila de la lista: saca el `messages` del include (que trae como mucho
+ * uno) y lo publica como `lastMessage`. Importa que `messages` NO viaje en la
+ * respuesta: un array casi vacío en cada fila confunde al cliente y engorda el JSON.
+ *
+ * `sign` convierte la key de la foto del contacto en una URL firmada. La key sola no
+ * le sirve de nada al navegador y las URLs caducan, así que se firma al serializar,
+ * igual que hace `withMediaUrl` con los adjuntos.
+ */
+export function shapeConversationRow<
+  T extends { id: string; messages?: unknown[]; contact?: { avatarKey?: string | null } | null },
+>(
+  row: T,
+  unread: number,
+  sign: (key: string) => string,
+): Omit<T, 'messages'> & { unread: number; lastMessage: unknown | null } {
+  const { messages, ...rest } = row;
+  const contact = rest.contact
+    ? { ...rest.contact, avatarUrl: rest.contact.avatarKey ? sign(rest.contact.avatarKey) : null }
+    : rest.contact;
+  return { ...rest, contact, unread, lastMessage: messages?.[0] ?? null };
+}
+
 const STATUSES: ConversationStatus[] = ['open', 'pending', 'closed'];
 
 // Valida el status entrante del cliente; lanza si no es del enum.

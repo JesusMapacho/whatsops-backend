@@ -24,6 +24,17 @@ export class MediaController {
     res.setHeader('Content-Type', mime);
     res.setHeader('Content-Length', size);
     res.setHeader('Cache-Control', 'private, max-age=3600');
+    // Sin este manejador, un archivo que falta emite un 'error' que no captura nadie
+    // y tumba el proceso ENTERO: `stream.pipe()` no lo propaga a la promesa del
+    // handler, así que Nest nunca lo ve. Y faltar puede faltar (borrado, storage
+    // recreado, carrera con el existsSync): una imagen ausente es un 404, no una caída.
+    stream.on('error', () => {
+      if (res.headersSent) res.destroy();
+      else {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
     stream.pipe(res);
   }
 }

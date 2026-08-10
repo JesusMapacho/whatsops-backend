@@ -44,6 +44,7 @@ import { StorageService } from '../storage/storage.service';
 import {
   checkNumberExists,
   fetchChatPictureUrl,
+  getGroupSubject,
   sendReaction,
   sendSeen,
   setTyping,
@@ -422,20 +423,32 @@ export class MessagingService {
 
   // Foto de perfil del contacto de una conversación, en base64.
   //
-  // Se sirve por proxy y NO se guarda en una columna ni en el storage: así no hay
-  // que gestionar refresco, ni crecimiento de disco, ni el caso "la foto es null
-  // mientras la sesión sincroniza" (la siguiente carga reintenta gratis).
-  //
   // Va en base64 dentro del JSON, como el QR: un `<img src>` no puede mandar el
   // token de autenticación, así que un endpoint que devolviera la imagen cruda
   // tendría que ser público y firmado.
   //
-  // ponytail: sin caché en servidor; el navegador la cachea por el Cache-Control que
-  // pone el controlador y el frontend la pide una vez por conversación. Upgrade:
-  // guardar la key en Contact si el tráfico llega a importar.
-  async contactAvatar(tenantId: string, conversationId: string) {
+  // Además se guarda en el storage y su key queda en `Contact.avatarKey`. Ese es el
+  // único momento en que la foto se descarga: la bandeja luego la sirve desde el
+  // storage con una URL firmada, sin tocar WAHA. Bajarla al vuelo para cada fila de
+  // la lista sería el patrón de automatización que acaba en baneo del número.
+  //
+  // Se re-descarga en cada apertura del hilo, así que la foto se refresca sola si el
+  // contacto la cambia; la key anterior se borra para no dejar archivos huérfanos.
+  async contactProfile(tenantId: string, conversationId: string) {
     const ctx = await this.wahaCtx(tenantId, conversationId);
-    if (!ctx) return null;
+    if (!ctx) return { avatar: null, name: null };
+    const [avatar, name] = await Promise.all([
+      this.refreshAvatar(tenantId, conversationId, ctx),
+      this.refreshGroupName(tenantId, conversationId, ctx),
+    ]);
+    return { avatar, name };
+  }
+
+  private async refreshAvatar(
+    tenantId: string,
+    conversationId: string,
+    ctx: { baseUrl: string; apiKey: string; session: string; chatId: string },
+  ) {
     const url = await fetchChatPictureUrl(ctx.baseUrl, ctx.apiKey, ctx.session, ctx.chatId).catch(
       () => null,
     );
@@ -444,10 +457,98 @@ export class MessagingService {
       // La URL es de la CDN de WhatsApp (otro origen), así que se descarga SIN la
       // api key y solo si no apunta hacia dentro de la red. Y con tope de tamaño.
       const { buffer, mime } = await fetchPayloadBinary(url, ctx.baseUrl, ctx.apiKey);
+      await this.persistAvatar(tenantId, conversationId, buffer, mime);
       return { mimetype: mime, data: buffer.toString('base64') };
     } catch (e) {
       this.logger.warn(`No se pudo traer la foto de perfil: ${(e as Error).message}`);
       return null;
+    }
+  }
+
+  /**
+   * Asunto real del grupo. Sin esto el hilo se titula con el id (`<creador>-<epoch>`),
+   * que no le dice nada a nadie.
+   *
+   * Solo cuando el contacto es un grupo y AÚN NO tiene nombre: si alguien lo renombró
+   * a mano, ese nombre manda y no se pisa en la siguiente apertura del hilo.
+   */
+  private async refreshGroupName(
+    tenantId: string,
+    conversationId: string,
+    ctx: { baseUrl: string; apiKey: string; session: string; chatId: string },
+  ): Promise<string | null> {
+    try {
+      const conv = await this.prisma.conversation.findFirst({
+        where: { id: conversationId, tenantId },
+        select: { contactId: true, contact: { select: { isGroup: true, name: true } } },
+      });
+      if (!conv?.contact?.isGroup || conv.contact.name) return conv?.contact?.name ?? null;
+
+      const subject = await getGroupSubject(ctx.baseUrl, ctx.apiKey, ctx.session, ctx.chatId);
+      if (!subject) return null;
+      await this.prisma.contact.update({ where: { id: conv.contactId }, data: { name: subject } });
+      this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversationId });
+      return subject;
+    } catch (e) {
+      this.logger.warn(`No se pudo traer el nombre del grupo: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Renombrar el contacto (o el grupo) a mano. Vacío = volver al nombre automático. */
+  async renameContact(tenantId: string, conversationId: string, raw: unknown) {
+    if (raw !== null && typeof raw !== 'string') {
+      throw new BadRequestException('name debe ser texto o null');
+    }
+    const name = typeof raw === 'string' ? raw.trim().slice(0, 120) : '';
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, tenantId },
+      select: { contactId: true },
+    });
+    if (!conv) throw new NotFoundException('Conversación no encontrada');
+    const contact = await this.prisma.contact.update({
+      where: { id: conv.contactId },
+      data: { name: name || null },
+      select: { id: true, name: true },
+    });
+    this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversationId });
+    return contact;
+  }
+
+  // Guarda la foto la PRIMERA vez y ya no la vuelve a tocar. Mejor esfuerzo: si
+  // falla, el hilo ya tiene su base64 y lo único que se pierde es la miniatura.
+  //
+  // Guardar una copia nueva en cada apertura parecía mejor (foto siempre fresca),
+  // pero cada key es un archivo distinto: las URLs firmadas que el navegador ya
+  // tenía de la lista apuntaban al archivo viejo y devolvían 404 en cuanto se
+  // borraba. Una key estable no caduca nunca.
+  //
+  // ponytail: la miniatura de la lista se queda con la primera foto aunque el
+  // contacto la cambie; la cabecera del hilo sí enseña la actual, porque el
+  // base64 se pide en cada apertura. Upgrade si molesta: guardar un hash junto a
+  // la key y reescribir el MISMO archivo cuando cambie (hace falta un `putAt`).
+  private async persistAvatar(
+    tenantId: string,
+    conversationId: string,
+    buffer: Buffer,
+    mime: string,
+  ) {
+    try {
+      const conv = await this.prisma.conversation.findFirst({
+        where: { id: conversationId, tenantId },
+        select: { contactId: true, contact: { select: { avatarKey: true } } },
+      });
+      if (!conv || conv.contact?.avatarKey) return;
+      const key = await this.storage.put(buffer, mime, 'avatar');
+      await this.prisma.contact.update({
+        where: { id: conv.contactId },
+        data: { avatarKey: key },
+      });
+      // Sin este aviso la foto queda guardada pero invisible: la bandeja solo recibe
+      // la URL cuando vuelve a pedir la lista, y nada se lo pedía.
+      this.events.emitToTenant(tenantId, 'conversation:updated', { id: conversationId });
+    } catch (e) {
+      this.logger.warn(`No se pudo guardar la foto de perfil: ${(e as Error).message}`);
     }
   }
 
