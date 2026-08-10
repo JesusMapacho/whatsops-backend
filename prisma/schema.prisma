@@ -94,6 +94,7 @@ model Tenant {
   cannedResponses CannedResponse[]
   paymentMethods  PaymentMethod[]
   broadcasts      Broadcast[]
+  statusPosts     StatusPost[]
   subscription    Subscription?
 }
 
@@ -194,6 +195,7 @@ model User {
   notes               Note[]
   verificationCodes   VerificationCode[]
   broadcasts          Broadcast[]
+  statusPosts         StatusPost[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -250,6 +252,7 @@ model WabaConnection {
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
   broadcasts    Broadcast[]
+  statusPosts   StatusPost[]
 
   @@unique([platform, phoneNumberId])
   @@index([tenantId])
@@ -290,6 +293,38 @@ model Broadcast {
   recipients     BroadcastRecipient[]
 
   @@index([tenantId, status])
+}
+
+// Estado publicado ("historia" de WhatsApp). Solo existe en el transporte por QR: la
+// API oficial de Meta no puede publicar estados.
+//
+// Se guarda registro porque sin él el operador no puede responder "¿qué se publicó
+// ayer?" ni la consola de plataforma detectar un abuso. Además es lo que hace de
+// contador para el cupo diario.
+model StatusPost {
+  id               String   @id @default(cuid())
+  tenantId         String
+  wabaConnectionId String
+  createdById      String
+  // text | image | video | voice
+  type             String
+  text             String?
+  // Copia propia del media en nuestro storage (key), para poder mostrar qué se
+  // publicó cuando el estado ya expiró en WhatsApp.
+  mediaKey         String?
+  mimeType         String?
+  caption          String?
+  backgroundColor  String?
+  // A cuántos contactos se envió. `null` = a TODA la libreta (que en un número de
+  // negocio son todos los que han escrito alguna vez).
+  audienceCount    Int?
+  createdAt        DateTime @default(now())
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  wabaConnection WabaConnection @relation(fields: [wabaConnectionId], references: [id], onDelete: Cascade)
+  createdBy      User           @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, createdAt])
 }
 
 model BroadcastRecipient {

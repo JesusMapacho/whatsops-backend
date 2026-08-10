@@ -195,4 +195,14 @@ assert.strictEqual(waha.supportsColdOutreach, true);
 // Y el que no tiene ventana es el único al que los topes en frío contienen de verdad.
 assert.ok(waha.paced && !waha.enforcesWindow);
 
+// --- Estados / historias (feature 29 fase 7) ---
+// Ventaja real del canal por QR: la API oficial de Meta NO puede publicar estados
+// (el Cloud API es de mensajería; los estados son función de consumidor).
+assert.strictEqual(waha.supportsStatus, true);
+assert.ok(!wa.supportsStatus, 'Cloud API no puede publicar estados');
+assert.ok(!msn.supportsStatus);
+// Y en NOWEB se publica pero NO se borra: un estado equivocado se queda sus 24 h.
+// La UI lo avisa ANTES de publicar en vez de ofrecer un botón que no existe.
+assert.strictEqual(waha.supportsStatusDelete, false);
+
 console.log('channels.check OK');

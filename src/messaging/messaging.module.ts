@@ -14,6 +14,8 @@ import { ConversationsController } from './conversations.controller';
 import { TemplatesController } from './templates.controller';
 import { CannedResponsesController } from './canned-responses.controller';
 import { BroadcastController } from './broadcast.controller';
+import { StatusService } from './status.service';
+import { StatusController } from './status.controller';
 
 @Module({
   imports: [
@@ -39,8 +41,16 @@ import { BroadcastController } from './broadcast.controller';
     TemplatesController,
     CannedResponsesController,
     BroadcastController,
+    StatusController,
   ],
-  providers: [MessagingService, ConversationsService, CannedResponsesService, BroadcastService, BroadcastProcessor],
+  providers: [
+    MessagingService,
+    ConversationsService,
+    CannedResponsesService,
+    BroadcastService,
+    BroadcastProcessor,
+    StatusService,
+  ],
   exports: [ConversationsService],
 })
 export class MessagingModule {}

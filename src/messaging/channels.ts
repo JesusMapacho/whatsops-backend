@@ -34,6 +34,16 @@ export interface ChannelAdapter {
   // un PSID/IGSID, y este adaptador tampoco soporta plantillas. Rechazarlo aquí evita
   // crear una conversación que jamás podría enviar nada.
   supportsColdOutreach: boolean;
+  // ¿Se pueden publicar estados (las "historias" de WhatsApp)?
+  //
+  // Ventaja real del canal por QR: la API oficial de Meta **no puede hacerlo**. El
+  // Cloud API es de mensajería y los estados son función de consumidor, no expuesta.
+  // Que los únicos que lo ofrecen sean también no oficiales lo confirma.
+  supportsStatus?: boolean;
+  // ¿Se puede BORRAR un estado publicado? En NOWEB (el engine que usamos) no: es
+  // solo WEBJS/WPP. Un estado equivocado se queda sus 24 h, y la UI tiene que
+  // avisarlo ANTES de publicar, no ofrecer un botón que no existe.
+  supportsStatusDelete?: boolean;
   // MIMEs que este canal acepta ADEMÁS de la lista blanca de la Cloud API
   // (MEDIA_LIMITS). WAHA transcodifica con ffmpeg, así que traga lo que graba el
   // navegador; la lista de Meta no se ensancha por ello.
@@ -175,6 +185,10 @@ const waha: ChannelAdapter = {
   // Técnicamente sí, y por eso los topes en frío son lo único que lo contiene: aquí
   // no hay ventana ni plantillas que obliguen a nada.
   supportsColdOutreach: true,
+  supportsStatus: true,
+  // NOWEB publica pero NO borra (borrar es solo WEBJS/WPP). Si algún día se cambia
+  // de engine, esta línea es lo único que hay que tocar.
+  supportsStatusDelete: false,
   // WAHA transcodifica con ffmpeg, así que acepta lo que graba el navegador
   // (Chrome/Edge dan audio/webm; Safari audio/mp4).
   extraMimes: ['audio/webm', 'audio/ogg'],
