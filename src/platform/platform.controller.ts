@@ -44,6 +44,18 @@ export class PlatformController {
     return this.platform.wahaSessions();
   }
 
+  // Envíos masivos de todos los tenants, y el botón para parar uno. Es lo que el
+  // operador necesita a las 2 a.m., cuando el problema ya está pasando.
+  @Get('broadcasts')
+  broadcasts(@Query('status') status?: string) {
+    return this.platform.broadcasts(status || undefined);
+  }
+
+  @Patch('broadcasts/:id')
+  cancelBroadcast(@Param('id') id: string, @Body() body: any) {
+    return this.platform.cancelBroadcast(id, body);
+  }
+
   // Agregados de negocio de un tenant (cross-tenant, auditado por el guard).
   @Get('tenants/:id/metrics-negocio')
   tenantMetrics(@Param('id') id: string, @Query('from') from?: string, @Query('to') to?: string) {

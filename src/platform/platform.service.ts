@@ -122,6 +122,21 @@ export class PlatformService implements OnModuleInit {
     });
     const sentByTenant = new Map(sent.map((s) => [s.tenantId, s._count._all]));
 
+    // Conversaciones abiertas EN FRÍO en 24 h. Sin esto, esta vista no distingue una
+    // mesa de soporte ocupada (200 salientes, todos a gente que escribió primero) de
+    // un spammer (200 salientes a 200 desconocidos) — y son lo mismo en `sentLast24h`.
+    const cold = await this.prisma.conversation.groupBy({
+      by: ['tenantId'],
+      where: {
+        createdAt: { gt: since },
+        lastInboundAt: null,
+        messages: { some: { direction: 'out' } },
+        tenantId: { in: conns.map((c) => c.tenantId) },
+      },
+      _count: { _all: true },
+    });
+    const coldByTenant = new Map(cold.map((s) => [s.tenantId, s._count._all]));
+
     return conns.map((c) => ({
       id: c.id,
       tenantId: c.tenantId,
@@ -132,7 +147,67 @@ export class PlatformService implements OnModuleInit {
       status: c.status,
       createdAt: c.createdAt,
       sentLast24h: sentByTenant.get(c.tenantId) ?? 0,
+      coldLast24h: coldByTenant.get(c.tenantId) ?? 0,
     }));
+  }
+
+  // Envíos masivos de todos los tenants. Es lo que el operador necesita a las 2 a.m.
+  // cuando un tenant está inundando la instancia: verlo y pararlo.
+  broadcasts(status?: string) {
+    return this.prisma.broadcast.findMany({
+      where: {
+        tenantId: { not: PLATFORM_TENANT_ID },
+        ...(status ? { status } : {}),
+      },
+      select: {
+        id: true,
+        tenantId: true,
+        status: true,
+        reason: true,
+        type: true,
+        templateName: true,
+        total: true,
+        sent: true,
+        failed: true,
+        skipped: true,
+        createdAt: true,
+        tenant: { select: { name: true, plan: true } },
+        wabaConnection: { select: { platform: true, phoneNumberId: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  // Cancelar el envío de OTRO tenant. El guard ya audita quién lo hizo.
+  async cancelBroadcast(id: string, body: any) {
+    if (body?.status !== 'canceled') {
+      throw new BadRequestException('Solo se puede cancelar: status debe ser "canceled"');
+    }
+    const b = await this.prisma.broadcast.findUnique({ where: { id } });
+    if (!b) throw new NotFoundException('Envío no encontrado');
+    // Misma guarda que `updateTenant`: el tenant de plataforma no es un cliente.
+    if (b.tenantId === PLATFORM_TENANT_ID) {
+      throw new BadRequestException('Tenant de plataforma no editable');
+    }
+    await this.prisma.broadcast.updateMany({
+      where: { id, status: 'running' },
+      data: { status: 'canceled', reason: 'Cancelado por el operador de la plataforma.' },
+    });
+    // Los pendientes se cierran aquí también: dejarlos "pending" haría que la consola
+    // muestre destinatarios que no van a salir nunca. Los jobs NO se borran de Redis
+    // (sería una carrera con el worker): el worker relee el estado y no hace nada.
+    const { count } = await this.prisma.broadcastRecipient.updateMany({
+      where: { broadcastId: id, status: 'pending' },
+      data: { status: 'skipped', reason: 'Envío cancelado por la plataforma.' },
+    });
+    if (count) {
+      await this.prisma.broadcast.update({
+        where: { id },
+        data: { skipped: { increment: count } },
+      });
+    }
+    return { id, status: 'canceled', canceled: count };
   }
 
   async updateTenant(id: string, body: any) {
