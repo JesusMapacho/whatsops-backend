@@ -7,6 +7,9 @@ import { channelAdapter } from './channels';
 import { UploadedMediaFile } from './messaging.service';
 import { isVoiceMime, validateMedia } from './media.util';
 import { checkNumberExists, sessionMeId } from '../waha/waha.client';
+import { ContactListsService } from '../contacts/contact-lists.service';
+import { Actor } from '../contacts/access';
+import { isCanonicalWaId } from './contact-resolve';
 
 // Publicar estados ("historias") en el WhatsApp del negocio.
 //
@@ -39,6 +42,7 @@ export class StatusService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly storage: StorageService,
+    private readonly lists: ContactListsService,
     config: ConfigService,
   ) {
     this.wahaUrl = config.get<string>('WAHA_URL') ?? '';
@@ -77,7 +81,13 @@ export class StatusService {
 
   // `file` solo para los tipos con media. `contacts` vacío = TODA la libreta, y eso
   // tiene que ser una decisión explícita (ver `all`), no el valor por defecto.
-  async publish(tenantId: string, userId: string, body: any, file?: UploadedMediaFile) {
+  async publish(
+    tenantId: string,
+    userId: string,
+    actor: Actor,
+    body: any,
+    file?: UploadedMediaFile,
+  ) {
     const conn = await this.prisma.wabaConnection.findFirst({
       where: { id: typeof body?.wabaConnectionId === 'string' ? body.wabaConnectionId : '', tenantId },
     });
@@ -98,13 +108,22 @@ export class StatusService {
 
     // Audiencia. `contacts` ausente publica a TODA la libreta, que en un número de
     // negocio son todos los que han escrito alguna vez: por eso se exige elegir.
-    // Acepta array o texto separado por comas/saltos: el formulario viaja como
-    // multipart (por el archivo) y ahí un solo `contacts` llega como string, no array.
-    const contacts = parseContacts(body?.contacts);
+    // Tres audiencias posibles, y una de ellas es la que de verdad funciona bien.
+    //
+    // Desde una CARTERA los destinatarios son `Contact.waId`: JIDs canónicos que
+    // vinieron de conversaciones reales, o sea los mismos que hacen funcionar el camino
+    // de "todos". Es el arreglo de fondo del bug de los estados — con números escritos a
+    // mano, WhatsApp devolvía 201 y no lo veía nadie.
+    const listId = typeof body?.contactListId === 'string' ? body.contactListId : '';
     const all = body?.all === true || body?.all === 'true';
+    const contacts = listId
+      ? (await this.lists.usableMembers(tenantId, actor, listId)).map(audienceIdOf)
+      : parseContacts(body?.contacts);
     if (!all && !contacts.length) {
       throw new BadRequestException(
-        'Elige a quién: unos contactos, o marca explícitamente "todos mis contactos".',
+        listId
+          ? 'Esa cartera no tiene a nadie a quien publicarle.'
+          : 'Elige a quién: una cartera, unos contactos, o marca explícitamente "todos mis contactos".',
       );
     }
     // Tope: cada destinatario cuesta una consulta al proveedor para resolver su
@@ -118,6 +137,10 @@ export class StatusService {
     const kind = this.kindOf(file);
     // Resolver ANTES de subir el media: si un número no existe, mejor fallar sin
     // haber guardado una copia del archivo que nadie va a ver.
+    //
+    // Desde una cartera NO se resuelve nada: los waId ya son canónicos. `resolveAudience`
+    // los deja pasar tal cual porque llevan `@`, así que la consulta por destinatario se
+    // ahorra sola — pero lo que importa es que no hay nada que adivinar.
     const audiencia = all ? [] : await this.withOwner(conn, await this.resolveAudience(conn, contacts));
     const payload: Record<string, unknown> = {
       session: conn.phoneNumberId,
@@ -285,6 +308,21 @@ export class StatusService {
     if (mime.startsWith('audio/')) return 'voice';
     throw new BadRequestException('Un estado solo puede ser texto, imagen, vídeo o audio.');
   }
+}
+
+// Identificador con el que un miembro de la cartera puede recibir un ESTADO.
+//
+// No sirve usar el `waId` a ciegas, y esto se descubrió mirando datos reales: con LID
+// addressing el waId es un `<n>@lid`, y la lista de destinatarios de un estado que SÍ
+// funciona (la de toda la libreta) va en formato `@s.whatsapp.net`. Un `@lid` ahí es otro
+// formato: se acepta y no se ve — el mismo fallo silencioso de siempre.
+//
+// Para ENVIAR un mensaje el `@lid` va perfecto (toda la feature 28 funciona así); es solo
+// la audiencia de un estado la que necesita el número. Así que cuando el waId no es
+// canónico se devuelven los DÍGITOS, y `resolveAudience` los convierte preguntando a WAHA.
+export function audienceIdOf(c: { waId: string; phone: string | null }): string {
+  if (isCanonicalWaId('waha', c.waId)) return c.waId;
+  return c.phone ?? c.waId;
 }
 
 // Trocea lo que escribió el operador en entradas sueltas: teléfonos en dígitos, o

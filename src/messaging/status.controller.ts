@@ -43,6 +43,14 @@ export class StatusController {
     @Body() body: any,
     @UploadedFile() file?: UploadedMediaFile,
   ) {
-    return this.status.publish(user.tenantId, user.userId, body, file);
+    // El actor viaja porque la audiencia puede salir de una cartera, y el acceso a una
+    // cartera se decide por ROL.
+    return this.status.publish(
+      user.tenantId,
+      user.userId,
+      { role: user.role, roleId: user.roleId ?? null },
+      body,
+      file,
+    );
   }
 }

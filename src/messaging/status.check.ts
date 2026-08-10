@@ -1,6 +1,20 @@
 // Check de los destinatarios de un estado. Correr: npx ts-node src/messaging/status.check.ts
 import * as assert from 'node:assert';
-import { parseContacts } from './status.service';
+import { audienceIdOf, parseContacts } from './status.service';
+
+// ── Audiencia desde una cartera ───────────────────────────────────────────────
+// Un `@c.us` es el identificador bueno y se usa tal cual.
+assert.strictEqual(audienceIdOf({ waId: '5218715172350@c.us', phone: '5218715172350' }), '5218715172350@c.us');
+
+// UN `@lid` NO SIRVE PARA UN ESTADO, y esto salió de mirar datos reales: la audiencia que
+// funciona (toda la libreta) va en formato `@s.whatsapp.net`, así que un `@lid` ahí es
+// otro formato — se acepta y no lo ve nadie. Se manda el teléfono y WAHA lo resuelve.
+// Para ENVIAR un mensaje el `@lid` va perfecto; es solo la audiencia del estado.
+assert.strictEqual(audienceIdOf({ waId: '32062350315666@lid', phone: '5218713659940' }), '5218713659940');
+
+// Sin teléfono no queda más remedio que intentarlo con el waId: mejor un destinatario
+// dudoso que descartar a alguien de la cartera en silencio.
+assert.strictEqual(audienceIdOf({ waId: '32062350315666@lid', phone: null }), '32062350315666@lid');
 
 // LA ASERCIÓN QUE IMPORTA, y que antes decía lo contrario: este parser devuelve
 // DÍGITOS, no un chatId. Pegar `@c.us` a lo que se escribió era un bug observado —
