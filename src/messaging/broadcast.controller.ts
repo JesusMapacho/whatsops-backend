@@ -15,16 +15,27 @@ export class BroadcastController {
     return this.broadcasts.list(user.tenantId);
   }
 
-  // Lee el CSV y devuelve el recuento SIN crear nada, para que el operador vea lo
-  // que va a pasar antes de confirmarlo.
+  // Recuento SIN crear nada, para que el operador vea lo que va a pasar antes de
+  // confirmarlo. Sirve para el CSV y para una cartera.
   @Post('preview')
-  preview(@Body() body: any) {
-    return this.broadcasts.preview(typeof body?.csv === 'string' ? body.csv : '');
+  preview(@CurrentUser() user: AuthUser, @Body() body: any) {
+    return this.broadcasts.preview(
+      user.tenantId,
+      { role: user.role, roleId: user.roleId ?? null },
+      body,
+    );
   }
 
   @Post()
   create(@CurrentUser() user: AuthUser, @Body() body: any) {
-    return this.broadcasts.create(user.tenantId, user.userId, body);
+    // El actor viaja porque los destinatarios pueden salir de una cartera, y el acceso a
+    // una cartera se decide por ROL, no solo por permiso.
+    return this.broadcasts.create(
+      user.tenantId,
+      user.userId,
+      { role: user.role, roleId: user.roleId ?? null },
+      body,
+    );
   }
 
   @Get(':id')

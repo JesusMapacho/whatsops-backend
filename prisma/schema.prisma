@@ -335,6 +335,13 @@ model BroadcastRecipient {
   id          String    @id @default(cuid())
   broadcastId String
   phone       String
+  // Contacto de la cartera, cuando el envío sale de una (v5 feature 30). Presente
+  // significa que su `waId` YA es canónico: el worker no tiene que preguntar el chatId
+  // ni construirlo, que es lo que fallaba en silencio con números escritos a mano.
+  //
+  // No sirve reusar `phone` para esto: en los contactos de Cloud API es NULL, y el eje
+  // común de identidad es el Contact, no el teléfono.
+  contactId   String?
   // Valores de las variables de la plantilla, resueltos en la SUBIDA. Así el worker
   // no necesita el CSV: no hay que guardarlo (es PII de gente que todavía no es
   // cliente) y el job de la cola sigue pesando ~30 bytes.
@@ -346,6 +353,7 @@ model BroadcastRecipient {
   sentAt      DateTime?
 
   broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
   // Todo el deduplicado del envío, en una línea: `createMany({ skipDuplicates })`
   // colapsa los repetidos del CSV sin recorrerlos a mano.
@@ -375,6 +383,7 @@ model Contact {
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
   listMembers   ContactListMember[]
+  broadcastRows BroadcastRecipient[]
 
   @@unique([tenantId, platform, waId])
   @@index([tenantId])

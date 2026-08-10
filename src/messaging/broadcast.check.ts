@@ -60,6 +60,13 @@ assert.strictEqual(con({ limit: null }).action, 'abort');
 assert.strictEqual(con({ consecutiveFailures: MAX_CONSECUTIVE_FAILURES - 1 }).action, 'send');
 assert.strictEqual(con({ consecutiveFailures: MAX_CONSECUTIVE_FAILURES }).action, 'abort');
 
+// Un destinatario excluido por su CICLO DE VIDA (agotado, o en enfriamiento) entra en el
+// envío ya marcado como `skipped` con su motivo, así que el worker lo ve como "ya
+// procesado" y lo SALTA — nunca aborta el envío entero. La diferencia importa: el tope
+// del tenant es del envío y para todo; que una persona concreta no acepte más mensajes es
+// suyo y solo la afecta a ella.
+assert.strictEqual(con({ recipientStatus: 'skipped' }).action, 'skip');
+
 // --- Topes e intervalo por canal ---
 // WAHA va mucho más bajo: la reputación de la instancia es COMPARTIDA entre tenants.
 assert.strictEqual(maxRecipients('waha'), 50);

@@ -1,40 +1,86 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { MessagingService } from './messaging.service';
 import { openConversation, resolveContact } from './contact-resolve';
 import { parseRecipients } from './csv';
 import { decideRecipient, maxRecipients, MAX_CONSECUTIVE_FAILURES, sendIntervalMs } from './broadcast';
+import { canSend, LifecycleConfig, lifecycleFromEnv } from './lifecycle';
+import { ContactListsService } from '../contacts/contact-lists.service';
+import { Actor } from '../contacts/access';
 
 export const BROADCAST_QUEUE = 'broadcast';
+
+// Fila de destinatario antes de persistirla. `contactId` presente = viene de una cartera
+// y su waId ya es canónico; `reason` presente = queda excluido de salida, con su motivo.
+interface BroadcastRow {
+  phone: string;
+  vars: string[];
+  line: number;
+  contactId: string | null;
+  reason?: string;
+}
+
+// Las dos fuentes devuelven la misma forma para que quien llama no tenga que preguntar
+// de dónde vinieron los destinatarios.
+interface Fuente {
+  recipients: BroadcastRow[];
+  duplicates: number;
+  excluidos: BroadcastRow[];
+}
 
 @Injectable()
 export class BroadcastService {
   private readonly logger = new Logger(BroadcastService.name);
 
+  private readonly lifecycle: LifecycleConfig;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly messaging: MessagingService,
+    private readonly lists: ContactListsService,
     @InjectQueue(BROADCAST_QUEUE) private readonly queue: Queue,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.lifecycle = lifecycleFromEnv((k) => config.get<string>(k));
+  }
 
-  // Lee el CSV y devuelve lo que se enviaría, SIN crear nada. La UI lo enseña antes
-  // de pedir la confirmación: el desastre realista no es un CSV mal formado, es
-  // "quería subir 12 números y el archivo tenía 1200".
-  preview(csv: string) {
-    const parsed = parseRecipients(csv);
+  // Devuelve lo que se enviaría, SIN crear nada. La UI lo enseña antes de pedir la
+  // confirmación: el desastre realista no es un archivo mal formado, es "quería subir 12
+  // números y el archivo tenía 1200".
+  //
+  // Sirve para las DOS fuentes, y en el camino de cartera no es un lujo: el servidor
+  // descuenta a quien no se le puede escribir ahora, así que el recuento que el operador
+  // tiene que confirmar solo lo sabe el servidor. Sin esto, confirmar sería imposible.
+  async preview(tenantId: string, actor: Actor, body: any) {
+    const listId = typeof body?.contactListId === 'string' ? body.contactListId : '';
+    if (listId) {
+      const { recipients, excluidos } = await this.fromList(tenantId, actor, listId, body);
+      return {
+        count: recipients.length,
+        duplicates: 0,
+        // Los excluidos se enseñan con su motivo: "de 40 clientes, 12 no han contestado
+        // todavía" es información que cambia la decisión de enviar.
+        rejected: excluidos.slice(0, 20).map((r) => ({ line: 0, raw: r.phone, reason: r.reason ?? '' })),
+        excluded: excluidos.length,
+        sample: recipients.slice(0, 5).map((r) => r.phone),
+      };
+    }
+    const parsed = parseRecipients(typeof body?.csv === 'string' ? body.csv : '');
     return {
       count: parsed.recipients.length,
       duplicates: parsed.duplicates,
       rejected: parsed.rejected,
+      excluded: 0,
       // Muestra corta: la lista entera es PII de gente que todavía no es cliente y
       // no hace falta para decidir.
       sample: parsed.recipients.slice(0, 5).map((r) => r.phone),
     };
   }
 
-  async create(tenantId: string, userId: string, body: any) {
+  async create(tenantId: string, userId: string, actor: Actor, body: any) {
     const conn = await this.messaging.assertColdAllowed(tenantId, body);
 
     // Un solo envío activo por tenant. Mata de golpe la clase "100 envíos × 5000
@@ -46,10 +92,35 @@ export class BroadcastService {
       throw new BadRequestException('Ya tienes un envío en curso. Espera a que termine o cancélalo.');
     }
 
-    const csv = typeof body?.csv === 'string' ? body.csv : '';
-    if (!csv.trim()) throw new BadRequestException('Sube el archivo de destinatarios.');
-    const { recipients, duplicates } = parseRecipients(csv);
-    if (!recipients.length) throw new BadRequestException('No hay ningún número válido en el archivo.');
+    // Dos fuentes de destinatarios, y en el plan gratuito solo una.
+    //
+    // El CSV es un camino de entrada SIN consentimiento: se pegan 500 números y el único
+    // freno es el volumen. Una cartera solo contiene gente que nos escribió, así que en
+    // gratis es la única fuente. Quien quiera subir listas usa el transporte oficial,
+    // donde Meta pone sus propias reglas.
+    const listId = typeof body?.contactListId === 'string' ? body.contactListId : '';
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { plan: true },
+    });
+    const free = (tenant?.plan ?? 'free') === 'free';
+    if (free && !listId) {
+      throw new BadRequestException(
+        'En el plan gratuito los envíos salen de una cartera de clientes: elige una. ' +
+          'Solo puede contener a quien te ha escrito alguna vez.',
+      );
+    }
+
+    const { recipients, duplicates, excluidos } = listId
+      ? await this.fromList(tenantId, actor, listId, body)
+      : this.fromCsv(body);
+    if (!recipients.length) {
+      throw new BadRequestException(
+        listId
+          ? 'Esa cartera no tiene a nadie a quien se le pueda escribir ahora mismo.'
+          : 'No hay ningún número válido en el archivo.',
+      );
+    }
 
     const max = maxRecipients(conn.platform);
     if (recipients.length > max) {
@@ -78,9 +149,9 @@ export class BroadcastService {
     }
     if (type === 'template') {
       if (!body?.templateName) throw new BadRequestException('Elige una plantilla.');
-      // La plantilla se valida contra el CSV AQUÍ, no destinatario a destinatario:
-      // una columna de menos es un problema del archivo, y descubrirlo enviando son
-      // 500 errores 132xxx en vez de un mensaje accionable.
+      // La plantilla se valida contra los destinatarios AQUÍ, no uno a uno: una columna
+      // de menos es un problema del archivo, y descubrirlo enviando son 500 errores
+      // 132xxx en vez de un mensaje accionable.
       const needed = await this.messaging.templateParamCount(
         tenantId,
         String(body.templateName),
@@ -89,7 +160,9 @@ export class BroadcastService {
       const mal = recipients.find((r) => r.vars.length !== needed || r.vars.some((v) => !v));
       if (mal) {
         throw new BadRequestException(
-          `La plantilla necesita ${needed} valores por destinatario y la línea ${mal.line} trae ${mal.vars.length}.`,
+          listId
+            ? `La plantilla necesita ${needed} valores. Desde una cartera se mandan los MISMOS para todos: escríbelos.`
+            : `La plantilla necesita ${needed} valores por destinatario y la línea ${mal.line} trae ${mal.vars.length}.`,
         );
       }
     }
@@ -103,16 +176,38 @@ export class BroadcastService {
         text: type === 'text' ? String(body.text).trim() : null,
         templateName: type === 'template' ? String(body.templateName) : null,
         templateLanguage: type === 'template' ? String(body.templateLanguage ?? 'es') : null,
+        // `total` cuenta los que SE VAN a intentar. Los excluidos de salida se guardan
+        // como saltados con su motivo, así que no infla el progreso con gente que nunca
+        // iba a recibir nada.
         total: recipients.length,
+        skipped: excluidos.length,
       },
     });
     await this.prisma.broadcastRecipient.createMany({
-      data: recipients.map((r) => ({ broadcastId: broadcast.id, phone: r.phone, vars: r.vars })),
+      data: [
+        ...recipients.map((r) => ({
+          broadcastId: broadcast.id,
+          phone: r.phone,
+          vars: r.vars,
+          contactId: r.contactId,
+        })),
+        // Los excluidos entran ya cerrados: la pregunta de después es "a quién no le
+        // llegó y por qué", y sin esta fila la respuesta sería "no aparece".
+        ...excluidos.map((r) => ({
+          broadcastId: broadcast.id,
+          phone: r.phone,
+          vars: r.vars,
+          contactId: r.contactId,
+          status: 'skipped',
+          reason: r.reason,
+        })),
+      ],
       skipDuplicates: true,
     });
 
+    // Solo los pendientes se encolan: los excluidos ya están cerrados.
     const rows = await this.prisma.broadcastRecipient.findMany({
-      where: { broadcastId: broadcast.id },
+      where: { broadcastId: broadcast.id, status: 'pending' },
       select: { id: true },
     });
     // Un job RETRASADO por destinatario, no un tick que va sacando de la cola: el
@@ -130,6 +225,112 @@ export class BroadcastService {
 
     this.logger.log(`Envío ${broadcast.id}: ${rows.length} destinatarios cada ${step} ms.`);
     return { id: broadcast.id, total: rows.length, duplicates };
+  }
+
+  // --- Fuentes de destinatarios ---
+
+  private fromCsv(body: any): Fuente {
+    const csv = typeof body?.csv === 'string' ? body.csv : '';
+    if (!csv.trim()) throw new BadRequestException('Sube el archivo de destinatarios.');
+    const { recipients, duplicates } = parseRecipients(csv);
+    return {
+      recipients: recipients.map((r) => ({
+        phone: r.phone,
+        vars: r.vars,
+        line: r.line,
+        // Sin contacto todavía: el worker lo resolverá, con lo que eso cuesta (una
+        // consulta por destinatario para averiguar su chatId canónico).
+        contactId: null,
+      })),
+      duplicates,
+      // El CSV no puede excluir por ciclo de vida: sus números todavía no son contactos,
+      // así que no hay historial que consultar. El filtro real ocurre en el worker.
+      excluidos: [],
+    };
+  }
+
+  // Destinatarios desde una cartera. La diferencia que importa no es la comodidad: sus
+  // `waId` son CANÓNICOS porque vinieron de conversaciones reales, así que no hay nada
+  // que resolver ni que fabricar. Es lo que hacía fallar en silencio a los estados con
+  // números escritos a mano.
+  private async fromList(
+    tenantId: string,
+    actor: Actor,
+    listId: string,
+    body: any,
+  ): Promise<Fuente> {
+    // `usableMembers` comprueba el acceso por rol: si el operador no puede usar la
+    // cartera, aquí lanza y no hay envío.
+    const miembros = await this.lists.usableMembers(tenantId, actor, listId);
+    // Desde una cartera las variables de plantilla son las MISMAS para todos: no hay
+    // columnas de dónde sacar una por persona. Se escriben una vez.
+    const vars: string[] = Array.isArray(body?.params)
+      ? body.params.map((v: unknown) => String(v ?? '').trim())
+      : [];
+
+    // Se filtra por la etapa del ciclo AQUÍ, en la subida: enviar a 250 contactos
+    // agotados crearía 250 jobs y 250 queries para nada. Los que no pasan se guardan
+    // igual, con su motivo — "quién no lo recibió y por qué" es la pregunta de después.
+    const estados = await this.stagesFor(miembros.map((m) => m.id));
+    const recipients: BroadcastRow[] = [];
+    const excluidos: BroadcastRow[] = [];
+    for (const m of miembros) {
+      const fila: BroadcastRow = {
+        phone: m.phone ?? m.waId,
+        vars,
+        line: 0,
+        contactId: m.id,
+      };
+      const motivo = estados.get(m.id);
+      if (motivo) excluidos.push({ ...fila, reason: motivo });
+      else recipients.push(fila);
+    }
+    return { recipients, duplicates: 0, excluidos };
+  }
+
+  // Motivo por el que NO se le puede escribir ahora, por contacto. Ausente = se puede.
+  //
+  // Dos queries para toda la cartera, no una por contacto: la etapa se DERIVA de
+  // `lastInboundAt` y de los salientes, y las dos cosas se pueden agregar de golpe.
+  private async stagesFor(contactIds: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (!contactIds.length) return out;
+
+    const convs = await this.prisma.conversation.findMany({
+      where: { contactId: { in: contactIds } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, contactId: true, lastInboundAt: true, initiatedByUs: true },
+    });
+    // Una conversación por contacto: la más reciente, que es la que manda.
+    const porContacto = new Map<string, (typeof convs)[number]>();
+    for (const c of convs) if (!porContacto.has(c.contactId)) porContacto.set(c.contactId, c);
+
+    const salientes = await this.prisma.message.groupBy({
+      by: ['conversationId'],
+      where: { conversationId: { in: [...porContacto.values()].map((c) => c.id) }, direction: 'out' },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    });
+    const porConv = new Map(salientes.map((s) => [s.conversationId, s]));
+
+    const now = new Date();
+    for (const [contactId, conv] of porContacto) {
+      // El ciclo de prospección solo rige lo que abrimos nosotros. A quien nos escribió
+      // primero no se le aplica: los topes de volumen ya lo cubren.
+      if (!conv.initiatedByUs) continue;
+      const agg = porConv.get(conv.id);
+      const verdict = canSend(
+        {
+          lastInboundAt: conv.lastInboundAt,
+          outCount: agg?._count._all ?? 0,
+          lastOutAt: agg?._max.createdAt ?? null,
+          now,
+        },
+        this.lifecycle,
+      );
+      if (!verdict.ok) out.set(contactId, verdict.message);
+    }
+    return out;
   }
 
   list(tenantId: string) {
@@ -186,9 +387,13 @@ export class BroadcastService {
     // abortado por tope dejaría cientos de conversaciones huérfanas en la bandeja.
     const limit = b.status === 'running' ? await this.messaging.coldQuota(b.tenantId) : { allowed: true as const };
 
+    // Si el destinatario vino de una CARTERA, su contacto ya existe y su `waId` es
+    // canónico (salió de una conversación real). No hay nada que resolver: se ahorra una
+    // consulta por destinatario y, más importante, se elimina la única forma de
+    // equivocarse — fabricar un chatId que no existe.
     let exists: boolean | null = null;
     let waId = '';
-    if (b.status === 'running' && limit?.allowed) {
+    if (b.status === 'running' && limit?.allowed && !r.contactId) {
       const resolved = await this.messaging
         .coldWaIdFor(b.wabaConnection, r.phone)
         .catch(() => null);
@@ -216,12 +421,15 @@ export class BroadcastService {
     }
 
     try {
-      const contact = await resolveContact(this.prisma, {
-        tenantId: b.tenantId,
-        platform: b.wabaConnection.platform,
-        waId: waId || r.phone,
-        phone: r.phone,
-      });
+      // Desde cartera el contacto ya está; solo se resuelve en el camino del CSV.
+      const contact = r.contactId
+        ? { id: r.contactId }
+        : await resolveContact(this.prisma, {
+            tenantId: b.tenantId,
+            platform: b.wabaConnection.platform,
+            waId: waId || r.phone,
+            phone: r.phone,
+          });
       const conv = await openConversation(this.prisma, {
         tenantId: b.tenantId,
         platform: b.wabaConnection.platform,

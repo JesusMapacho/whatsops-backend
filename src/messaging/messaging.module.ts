@@ -5,6 +5,7 @@ import { CryptoModule } from '../crypto/crypto.module';
 import { EventsModule } from '../events/events.module';
 import { StorageModule } from '../storage/storage.module';
 import { WahaModule } from '../waha/waha.module';
+import { ContactsModule } from '../contacts/contacts.module';
 import { MessagingService } from './messaging.service';
 import { ConversationsService } from './conversations.service';
 import { CannedResponsesService } from './canned-responses.service';
@@ -24,6 +25,9 @@ import { StatusController } from './status.controller';
     EventsModule,
     StorageModule,
     WahaModule,
+    // El masivo y los estados sacan sus destinatarios de las carteras, con el acceso por
+    // rol ya comprobado en su servicio en vez de re-implementado aquí.
+    ContactsModule,
     BullModule.registerQueue({
       name: BROADCAST_QUEUE,
       defaultJobOptions: {
