@@ -179,6 +179,41 @@ export class PlatformService implements OnModuleInit {
     });
   }
 
+  // Carteras de clientes de todos los tenants, con su tamaño.
+  //
+  // La señal a mirar: en la capa gratuita una cartera solo se llena con gente que
+  // escribió, así que 5000 "clientes" en un tenant free significa una de dos cosas — o
+  // tiene un negocio de verdad muy activo, o alguien encontró la forma de meter una lista
+  // comprada. Las dos merecen una mirada, y sin esta vista no se distinguen.
+  async contactLists() {
+    const rows = await this.prisma.contactList.findMany({
+      where: { tenantId: { not: PLATFORM_TENANT_ID } },
+      select: {
+        id: true,
+        name: true,
+        isSystem: true,
+        createdAt: true,
+        tenantId: true,
+        tenant: { select: { name: true, plan: true } },
+        _count: { select: { members: true, roles: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    return rows.map((l) => ({
+      id: l.id,
+      name: l.name,
+      isSystem: l.isSystem,
+      createdAt: l.createdAt,
+      tenantId: l.tenantId,
+      tenantName: l.tenant.name,
+      plan: l.tenant.plan,
+      members: l._count.members,
+      // Cuántos roles tienen acceso. 0 = solo el admin del tenant (default cerrado).
+      roles: l._count.roles,
+    }));
+  }
+
   // Cancelar el envío de OTRO tenant. El guard ya audita quién lo hizo.
   async cancelBroadcast(id: string, body: any) {
     if (body?.status !== 'canceled') {

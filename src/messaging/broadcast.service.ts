@@ -8,6 +8,7 @@ import { openConversation, resolveContact } from './contact-resolve';
 import { parseRecipients } from './csv';
 import { decideRecipient, maxRecipients, MAX_CONSECUTIVE_FAILURES, sendIntervalMs } from './broadcast';
 import { canSend, LifecycleConfig, lifecycleFromEnv } from './lifecycle';
+import { EventsGateway } from '../events/events.gateway';
 import { ContactListsService } from '../contacts/contact-lists.service';
 import { Actor } from '../contacts/access';
 import { pickSelected } from '../contacts/pick';
@@ -43,10 +44,32 @@ export class BroadcastService {
     private readonly prisma: PrismaService,
     private readonly messaging: MessagingService,
     private readonly lists: ContactListsService,
+    private readonly events: EventsGateway,
     @InjectQueue(BROADCAST_QUEUE) private readonly queue: Queue,
     config: ConfigService,
   ) {
     this.lifecycle = lifecycleFromEnv((k) => config.get<string>(k));
+  }
+
+  // Avisa a la UI del progreso del envío. Se emite tras CADA destinatario y en cada
+  // cambio de estado: es lo que sustituye al botón de refrescar.
+  //
+  // Sin throttle a propósito: el ritmo del envío ya lo pone `sendIntervalMs` (1 s en
+  // Cloud, 8 s en WAHA), así que la frecuencia máxima de estos avisos es un evento por
+  // segundo. Un throttle aquí sería complejidad protegiendo de un problema que el diseño
+  // del envío ya impide.
+  private async emitProgress(id: string) {
+    const b = await this.prisma.broadcast
+      .findUnique({
+        where: { id },
+        select: {
+          id: true, tenantId: true, status: true, reason: true,
+          total: true, sent: true, failed: true, skipped: true,
+        },
+      })
+      .catch(() => null);
+    if (!b) return;
+    this.events.emitToTenant(b.tenantId, 'broadcast:updated', b);
   }
 
   // Devuelve lo que se enviaría, SIN crear nada. La UI lo enseña antes de pedir la
@@ -378,6 +401,7 @@ export class BroadcastService {
     // Los jobs NO se borran de Redis: borrarlos sería una carrera con el worker que
     // ya tiene uno en la mano. El worker relee el estado y no hace nada.
     await this.closePending(id, 'Envío cancelado.');
+    await this.emitProgress(id);
     return { id, status: 'canceled' };
   }
 
@@ -431,7 +455,11 @@ export class BroadcastService {
     }
     if (decision.action === 'skip') {
       // "Ya procesado" no se re-marca: sobreescribiría el motivo real con uno inútil.
-      if (r.status === 'pending') await this.close(r.id, b.id, 'skipped', decision.reason);
+      if (r.status === 'pending') {
+        await this.close(r.id, b.id, 'skipped', decision.reason);
+        await this.finishIfDone(b.id);
+        await this.emitProgress(b.id);
+      }
       return decision;
     }
 
@@ -467,6 +495,7 @@ export class BroadcastService {
         }),
       ]);
       await this.finishIfDone(b.id);
+      await this.emitProgress(b.id);
       return { action: 'send', messageId: msg.id };
     } catch (e) {
       const reason = (e as Error).message ?? 'Falló el envío.';
@@ -492,6 +521,7 @@ export class BroadcastService {
         await this.finishIfDone(b.id);
       }
       this.logger.warn(`Envío ${b.id}, destinatario ${r.phone}: ${reason}`);
+      await this.emitProgress(b.id);
       return { action: 'failed', reason };
     }
   }
@@ -521,6 +551,9 @@ export class BroadcastService {
       // mostrara 480 "pendientes" que no van a salir nunca.
       await this.closePending(id, reason);
     }
+    // Se avisa aunque no se haya pausado aquí: quien mira la pantalla tiene que ver el
+    // estado real, no el que había cuando cargó.
+    await this.emitProgress(id);
   }
 
   private async closePending(broadcastId: string, reason: string) {

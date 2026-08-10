@@ -51,6 +51,13 @@ export class PlatformController {
     return this.platform.broadcasts(status || undefined);
   }
 
+  // Carteras de todos los tenants. Una cartera enorme en un plan gratuito es la señal:
+  // ahí solo entra quien escribió, así que un salto raro merece una mirada.
+  @Get('contact-lists')
+  contactLists() {
+    return this.platform.contactLists();
+  }
+
   @Patch('broadcasts/:id')
   cancelBroadcast(@Param('id') id: string, @Body() body: any) {
     return this.platform.cancelBroadcast(id, body);
