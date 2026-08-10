@@ -228,6 +228,12 @@ model WabaConnection {
   id              String     @id @default(cuid())
   tenantId        String
   platform        Platform   @default(whatsapp)
+  // Nombre que le pone el negocio para reconocerla ("Ventas", "Sucursal centro").
+  //
+  // Hace falta porque `phoneNumberId` no es legible: en WAHA es el nombre de sesión
+  // DERIVADO del tenant (`t_cmsi4pfjh001r5g8svpwuoe08`), así que los selectores de
+  // "enviar desde" mostraban eso. Con varios números conectados era imposible acertar.
+  label           String?
   wabaId          String? // WhatsApp only
   // Id externo del canal: phone_number_id (WA) / page id (Messenger) / IG id /
   // nombre de sesión (WAHA, derivado del tenantId — ver wahaSessionName).

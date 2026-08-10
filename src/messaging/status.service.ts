@@ -55,7 +55,7 @@ export class StatusService {
   async connections(tenantId: string) {
     const conns = await this.prisma.wabaConnection.findMany({
       where: { tenantId },
-      select: { id: true, platform: true, phoneNumberId: true, status: true },
+      select: { id: true, platform: true, label: true, phoneNumberId: true, status: true },
     });
     return conns
       .filter((c) => channelAdapter(c.platform).supportsStatus)

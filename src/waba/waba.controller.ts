@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
 import { WabaService } from './waba.service';
 import { RequirePermissions } from '../auth/permissions.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
@@ -17,6 +17,12 @@ export class WabaController {
   @Get()
   list(@CurrentUser() user: AuthUser) {
     return this.waba.list(user.tenantId);
+  }
+
+  // Renombrar. Lo único editable: el resto define QUÉ conexión es.
+  @Patch(':id')
+  rename(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: any) {
+    return this.waba.rename(user.tenantId, id, body);
   }
 
   @Delete(':id')

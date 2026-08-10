@@ -54,6 +54,25 @@ export class WabaService {
     this.fullSync = config.get<string>('WAHA_FULL_SYNC') === 'true';
   }
 
+  // Nombre legible de la conexión. Se recorta a 60: es una etiqueta para un selector, y
+  // sin tope alguien pega un párrafo y rompe el desplegable.
+  private parseLabel(v: unknown): string | null {
+    if (typeof v !== 'string' || !v.trim()) return null;
+    return v.trim().slice(0, 60);
+  }
+
+  // Renombrar. Es lo único editable de una conexión: lo demás (token, id de canal,
+  // instancia) define QUÉ conexión es, y cambiarlo sería crear otra.
+  async rename(tenantId: string, id: string, body: any) {
+    const label = this.parseLabel(body?.label);
+    const { count } = await this.prisma.wabaConnection.updateMany({
+      where: { id, tenantId },
+      data: { label },
+    });
+    if (!count) throw new NotFoundException('Conexión no encontrada');
+    return { id, label };
+  }
+
   async create(tenantId: string, body: any) {
     const platform = parsePlatform(body?.platform);
     // WAHA sale antes: no lleva token de Meta ni id de canal del cliente, y
@@ -74,6 +93,7 @@ export class WabaService {
         data: {
           tenantId,
           platform,
+          label: this.parseLabel(body?.label),
           wabaId,
           phoneNumberId,
           accessTokenEnc: this.crypto.encrypt(accessToken),
@@ -130,6 +150,7 @@ export class WabaService {
         data: {
           tenantId,
           platform: 'waha',
+          label: this.parseLabel(body?.label),
           wabaId: null,
           businessId: null,
           phoneNumberId: session,
@@ -314,6 +335,7 @@ export class WabaService {
     id: string;
     tenantId: string;
     platform: Platform;
+    label: string | null;
     wabaId: string | null;
     phoneNumberId: string;
     businessId: string | null;
@@ -326,6 +348,7 @@ export class WabaService {
       id: c.id,
       tenantId: c.tenantId,
       platform: c.platform,
+      label: c.label,
       wabaId: c.wabaId,
       phoneNumberId: c.phoneNumberId,
       businessId: c.businessId,

@@ -100,6 +100,7 @@ export class PlatformService implements OnModuleInit {
       select: {
         id: true,
         tenantId: true,
+        label: true,
         phoneNumberId: true,
         status: true,
         createdAt: true,
@@ -144,6 +145,9 @@ export class PlatformService implements OnModuleInit {
       plan: c.tenant.plan,
       tenantStatus: c.tenant.status,
       session: c.phoneNumberId,
+      // Nombre que le puso el negocio. Al operador le sirve para hablar con el cliente
+      // en sus términos ("tu conexión de Ventas") en vez de leerle un id de sesión.
+      label: c.label,
       status: c.status,
       createdAt: c.createdAt,
       sentLast24h: sentByTenant.get(c.tenantId) ?? 0,
