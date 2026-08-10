@@ -95,6 +95,7 @@ model Tenant {
   paymentMethods  PaymentMethod[]
   broadcasts      Broadcast[]
   statusPosts     StatusPost[]
+  contactLists    ContactList[]
   subscription    Subscription?
 }
 
@@ -143,9 +144,10 @@ model Role {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  users       User[]
-  permissions RolePermission[]
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users        User[]
+  permissions  RolePermission[]
+  contactLists ContactListRole[]
 
   @@unique([tenantId, name])
   @@index([tenantId])
@@ -196,6 +198,8 @@ model User {
   verificationCodes   VerificationCode[]
   broadcasts          Broadcast[]
   statusPosts         StatusPost[]
+  contactLists        ContactList[]
+  contactListMembers  ContactListMember[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -370,10 +374,69 @@ model Contact {
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
+  listMembers   ContactListMember[]
 
   @@unique([tenantId, platform, waId])
   @@index([tenantId])
   @@index([tenantId, phone])
+}
+
+// Cartera de clientes (v5 feature 30). Un subconjunto CURADO de Contact, no una copia:
+// los miembros apuntan al Contact que ya existe, cuyo `waId` vino de una conversación
+// real. Eso es justo lo que hace fiable enviar a una cartera — un chatId fabricado a
+// mano no existe en México (`52 871…` no es el wa_id `521871…`) y un estado dirigido
+// ahí devuelve 201 sin que lo vea nadie.
+model ContactList {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  // La cartera "Todos", creada y rellenada por el sistema con quien nos escribe. No se
+  // puede borrar ni renombrar: es el suelo sobre el que se arman las demás.
+  isSystem    Boolean  @default(false)
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?               @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  members   ContactListMember[]
+  roles     ContactListRole[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model ContactListMember {
+  contactListId String
+  contactId     String
+  addedById     String?
+  addedAt       DateTime @default(now())
+
+  contactList ContactList @relation(fields: [contactListId], references: [id], onDelete: Cascade)
+  contact     Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  addedBy     User?       @relation(fields: [addedById], references: [id], onDelete: SetNull)
+
+  // Clave compuesta: un contacto está o no está en la cartera, no hay más estado. Y de
+  // paso hace idempotente el alta automática desde el worker del webhook.
+  @@id([contactListId, contactId])
+  @@index([contactId])
+}
+
+// Quién puede usar y gestionar la cartera. Por ROL y no por usuario: así no hay que
+// tocar accesos cada vez que entra o sale alguien del equipo.
+//
+// Una cartera SIN ninguna fila aquí es solo de admin — default cerrado, ver access.ts.
+model ContactListRole {
+  contactListId String
+  roleId        String
+  // Además de usarla, puede editarla y dar de alta/baja miembros.
+  canManage     Boolean @default(false)
+
+  contactList ContactList @relation(fields: [contactListId], references: [id], onDelete: Cascade)
+  role        Role        @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([contactListId, roleId])
+  @@index([roleId])
 }
 
 model Conversation {

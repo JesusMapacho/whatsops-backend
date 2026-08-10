@@ -31,6 +31,20 @@ export const PERMISSION_CATALOG: PermissionMeta[] = [
       'Escribir a números que nunca nos han escrito, y envíos masivos. Los agentes contestan; prospectar es de admin.',
   },
   {
+    key: 'contacts:read',
+    label: 'Ver carteras de clientes',
+    group: 'Contactos',
+    description:
+      'Ver las carteras a las que da acceso su rol, y los contactos que contienen.',
+  },
+  {
+    key: 'contacts:manage',
+    label: 'Gestionar carteras',
+    group: 'Contactos',
+    description:
+      'Crear carteras, dar acceso por rol y dar de alta o baja contactos. Quién puede usar cada cartera se decide por rol en la cartera misma.',
+  },
+  {
     key: 'waba:create',
     label: 'Gestionar conexiones',
     group: 'Conexiones',
@@ -85,7 +99,11 @@ export type PermissionKey = (typeof PERMISSION_CATALOG)[number]['key'];
 // `conversations:outbound` queda FUERA de agent a propósito: escribir a desconocidos
 // arriesga la reputación del número del negocio (y en la capa gratuita, la de la
 // instancia compartida). Contestar es de agente; prospectar es de admin.
+// `contacts:read` SÍ va en agent: ver a quién atiendes es parte de atender, y el acceso
+// real lo sigue acotando el rol en cada cartera (una sin enlaces no la ve nadie salvo
+// admin). `contacts:manage` no, por lo mismo que `conversations:outbound`: decidir a
+// quién guardamos como cliente y a quién se le puede escribir es de admin.
 export const SYSTEM_ROLE_PERMISSIONS: Record<'admin' | 'agent', PermissionKey[]> = {
   admin: PERMISSION_CATALOG.map((p) => p.key),
-  agent: ['conversations:read', 'conversations:write'],
+  agent: ['conversations:read', 'conversations:write', 'contacts:read'],
 };
