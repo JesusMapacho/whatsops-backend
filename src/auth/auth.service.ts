@@ -109,7 +109,9 @@ export class AuthService {
     return { ...rest, onboardingComplete: tenant?.onboardingComplete ?? true, permissions };
   }
 
-  private async sign(
+  // Pública porque también la usa InvitationsService: aceptar una invitación crea
+  // la cuenta y deja la sesión abierta, con exactamente la misma forma que login.
+  async sign(
     userId: string,
     tenantId: string,
     role: string,

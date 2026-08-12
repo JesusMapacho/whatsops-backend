@@ -7,6 +7,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { HealthController } from './health/health.controller';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
+import { InvitationsModule } from './invitations/invitations.module';
 import { WabaModule } from './waba/waba.module';
 import { EventsModule } from './events/events.module';
 import { WebhookModule } from './webhook/webhook.module';
@@ -48,6 +49,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     PrismaModule,
     AuthModule,
     UsersModule,
+    InvitationsModule,
     WabaModule,
     EventsModule,
     WebhookModule,

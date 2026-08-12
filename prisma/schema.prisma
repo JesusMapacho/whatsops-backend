@@ -97,6 +97,7 @@ model Tenant {
   statusPosts     StatusPost[]
   contactLists    ContactList[]
   subscription    Subscription?
+  invitations     Invitation[]
 }
 
 // Método de pago de la suscripción a WhatsOps. NUNCA guarda el PAN: solo
@@ -148,8 +149,38 @@ model Role {
   users        User[]
   permissions  RolePermission[]
   contactLists ContactListRole[]
+  invitations  Invitation[]
 
   @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Invitación a unirse a un tenant. Se guarda SOLO el hash del token, igual que
+// VerificationCode: quien lea la base de datos no puede entrar con el enlace.
+//
+// El hash es sha256 y no bcrypt porque aquí hay que BUSCAR por el token (la
+// persona invitada solo trae eso), así que tiene que ser determinista e
+// indexable. El secreto son 32 bytes aleatorios, no un código de 6 dígitos: no
+// hay nada que salar ni que encarecer.
+model Invitation {
+  id          String    @id @default(cuid())
+  tenantId    String
+  email       String
+  roleId      String?
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  // Quién invitó. Sin FK a propósito: borrar a quien invitó no debe borrar la
+  // invitación ni bloquear su baja.
+  invitedById String?
+  note        String? // nota de bienvenida; se enseña en la pantalla de aceptar
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role   Role?  @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
   @@index([tenantId])
 }
 
