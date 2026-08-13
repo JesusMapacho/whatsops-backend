@@ -13,6 +13,7 @@ import { EventsModule } from './events/events.module';
 import { WebhookModule } from './webhook/webhook.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { ContactsModule } from './contacts/contacts.module';
+import { CrmModule } from './crm/crm.module';
 import { RolesModule } from './roles/roles.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { PlatformModule } from './platform/platform.module';
@@ -55,6 +56,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     WebhookModule,
     MessagingModule,
     ContactsModule,
+    CrmModule,
     RolesModule,
     ObservabilityModule,
     PlatformModule,
