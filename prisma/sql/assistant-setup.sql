@@ -28,8 +28,13 @@ END $$;
 
 GRANT USAGE ON SCHEMA public TO whatsops_ro;
 -- SELECT solo sobre las tablas consultables (debe coincidir con ALLOWED_TABLES del sql-guard).
+-- "Note" ya no existe: se absorbio en "Activity" (v8 feature 34).
+-- Requisito para estar en esta lista: tener columna "tenantId", porque la politica RLS de
+-- abajo se apoya en ella. Por eso quedan fuera las tablas puente ("ContactTag",
+-- "ContactListMember", "ContactListRole"): sin "tenantId" no hay aislamiento que aplicar.
 GRANT SELECT ON
-  "Conversation", "Message", "Contact", "Note", "Template", "CannedResponse"
+  "Conversation", "Message", "Contact", "Activity", "Deal", "Pipeline", "Stage", "Task",
+  "Tag", "Template", "CannedResponse"
   TO whatsops_ro;
 -- WabaConnection: SELECT a nivel COLUMNA, excluyendo "accessTokenEnc" (token cifrado, secreto).
 -- Si el SQL pide esa columna, el rol RO recibe "permission denied" (falla cerrado).
@@ -43,7 +48,7 @@ GRANT SELECT ("id", "tenantId", "wabaId", "phoneNumberId", "businessId", "source
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['Conversation','Message','Contact','Note','Template','CannedResponse','WabaConnection']
+  FOREACH t IN ARRAY ARRAY['Conversation','Message','Contact','Activity','Deal','Pipeline','Stage','Task','Tag','Template','CannedResponse','WabaConnection']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);

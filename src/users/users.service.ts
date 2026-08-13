@@ -94,13 +94,22 @@ export class UsersService {
   }
 
   // Borrar solo si nunca tuvo actividad; si tuvo, desactivar (conserva atribución).
+  //
+  // Las tareas asignadas entran en la cuenta y no es por simetría: `Task.assignedUserId`
+  // borra en CASCADA (una tarea sin responsable no la hace nadie, así que no puede quedar
+  // huérfana), o sea que sin este freno dar de baja a un vendedor se llevaría por delante
+  // su agenda de seguimiento. Los tratos que posee y las actividades que firmó sí se
+  // desenganchan solos (`SetNull`), pero también cuentan como actividad: si hay historial
+  // comercial suyo, lo correcto es desactivarlo y conservar la atribución.
   async remove(tenantId: string, id: string) {
     const user = await this.mustFind(tenantId, id);
-    const [convs, notes] = await Promise.all([
+    const [convs, activities, tasks, deals] = await Promise.all([
       this.prisma.conversation.count({ where: { tenantId, assignedUserId: id } }),
-      this.prisma.note.count({ where: { tenantId, authorId: id } }),
+      this.prisma.activity.count({ where: { tenantId, authorId: id } }),
+      this.prisma.task.count({ where: { tenantId, assignedUserId: id } }),
+      this.prisma.deal.count({ where: { tenantId, ownerId: id } }),
     ]);
-    if (convs > 0 || notes > 0) {
+    if (convs > 0 || activities > 0 || tasks > 0 || deals > 0) {
       throw new BadRequestException('El usuario tiene actividad; desactívalo en vez de borrarlo');
     }
     await this.prisma.user.delete({ where: { id: user.id } });

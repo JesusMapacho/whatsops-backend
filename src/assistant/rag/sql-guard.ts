@@ -7,11 +7,26 @@ export const STATEMENT_TIMEOUT_MS = 5000;
 
 // Allowlist de tablas consultables (nombres de tabla Postgres = modelos Prisma).
 // Debe coincidir con las tablas con RLS habilitada (assistant-setup.sql) y con el RAG.
+//
+// Requisito para entrar aquí: tener columna `tenantId`. La política RLS es
+// `tenantId = current_setting('app.tenant_id')`, así que una tabla sin esa columna no
+// puede aislarse por tenant y no se expone. Por eso quedan fuera las tablas puente
+// (`ContactTag`, `ContactListMember`, `ContactListRole`): el precio es que el asistente
+// no sabe contestar "cuántos contactos tienen la etiqueta VIP". Camino de upgrade el día
+// que alguien lo pida: desnormalizar `tenantId` en la puente, como ya se hace en `Stage`.
 export const ALLOWED_TABLES = [
   'Conversation',
   'Message',
   'Contact',
-  'Note',
+  // `Note` se absorbió en `Activity` (v8 feature 34). Si esta lista siguiera diciendo
+  // `Note`, el LLM generaría `SELECT ... FROM "Note"` —la tabla ya no existe— y el
+  // error saldría del ejecutor en vez del guard.
+  'Activity',
+  'Deal',
+  'Task',
+  'Pipeline',
+  'Stage',
+  'Tag',
   'Template',
   'CannedResponse',
   'WabaConnection',

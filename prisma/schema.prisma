@@ -60,6 +60,40 @@ enum WebhookProcessStatus {
   failed
 }
 
+// --- CRM (v8 features 34-38) ---
+
+// Cierre del trato. Es COLUMNA y no una etapa del tablero: como etapas se perdería la
+// conversión POR etapa (¿cuántos de los que llegaron a cotización cerraron?), el monto
+// ganado dejaría de ser sumable sin adivinar cuál columna final cuenta, y borrar esa
+// etapa borraría el histórico de ventas.
+enum DealStatus {
+  open
+  won
+  lost
+}
+
+enum TaskType {
+  call
+  whatsapp
+  email
+  meeting
+  other
+}
+
+// Lo que puede aparecer en el timeline de un contacto. Los tres primeros los registra
+// una persona (allowlist de `POST /activities`); el resto los escribe el servidor
+// cuando pasan — si el cliente pudiera inyectarlos, el timeline sería un cuento.
+enum ActivityType {
+  note
+  call
+  meeting
+  stage_change
+  deal_created
+  deal_won
+  deal_lost
+  task_done
+}
+
 model Tenant {
   id        String   @id @default(cuid())
   name      String
@@ -79,6 +113,10 @@ model Tenant {
   // Cuándo aceptó este negocio el aviso de escribir a desconocidos (v5 feature 29).
   // null = todavía no; el servidor lo exige, no la UI.
   coldOutreachAckedAt DateTime?
+  // Regla de alta automática de tratos (v8 feature 38): un entrante de quien no tiene
+  // trato abierto crea uno en la primera etapa. APAGADO por defecto, igual que
+  // COLD_OUTREACH_ENABLED: una regla que crea filas sola se enciende a mano.
+  autoDealOnInbound Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -90,7 +128,6 @@ model Tenant {
   messages        Message[]
   webhookEvents   WebhookEvent[]
   templates       Template[]
-  notes           Note[]
   cannedResponses CannedResponse[]
   paymentMethods  PaymentMethod[]
   broadcasts      Broadcast[]
@@ -98,6 +135,12 @@ model Tenant {
   contactLists    ContactList[]
   subscription    Subscription?
   invitations     Invitation[]
+  pipelines       Pipeline[]
+  stages          Stage[]
+  deals           Deal[]
+  tasks           Task[]
+  activities      Activity[]
+  tags            Tag[]
 }
 
 // Método de pago de la suscripción a WhatsOps. NUNCA guarda el PAN: solo
@@ -225,12 +268,16 @@ model User {
   tenant              Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   roleRef             Role?          @relation(fields: [roleId], references: [id], onDelete: SetNull)
   assignedConversations Conversation[] @relation("AssignedAgent")
-  notes               Note[]
   verificationCodes   VerificationCode[]
   broadcasts          Broadcast[]
   statusPosts         StatusPost[]
   contactLists        ContactList[]
   contactListMembers  ContactListMember[]
+  ownedContacts       Contact[]  @relation("ContactOwner")
+  ownedDeals          Deal[]     @relation("DealOwner")
+  assignedTasks       Task[]     @relation("TaskAssignee")
+  createdTasks        Task[]     @relation("TaskCreator")
+  activities          Activity[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -396,6 +443,12 @@ model BroadcastRecipient {
   // colapsa los repetidos del CSV sin recorrerlos a mano.
   @@unique([broadcastId, phone])
   @@index([broadcastId, status])
+  // Declarado aquí para cerrar una deriva: la migración de v5-30
+  // (20260810200000_broadcast_desde_cartera) ya crea este índice, pero el esquema no lo
+  // decía, así que cualquier `migrate dev` posterior generaba un DROP INDEX ajeno al
+  // cambio que se estuviera haciendo. Postgres no indexa las FK solo, y el índice se
+  // quiere: el borrado de un contacto pasa por aquí.
+  @@index([contactId])
 }
 
 model Contact {
@@ -419,17 +472,33 @@ model Contact {
   // pintarla sin una petición por fila: bajarla al vuelo para 200 conversaciones
   // sería justo el patrón de automatización que hace que baneen el número.
   avatarKey String?
+  // --- CRM (v8 feature 35). Editables; la IDENTIDAD (waId, phone) no lo es: cambiarla
+  // a mano rompe el emparejado de los mensajes entrantes.
+  email     String?
+  // Empresa como TEXTO y no tabla `Company`: agrupar y filtrar "todos los de ACME" ya
+  // funciona con un índice. La tabla cuando alguien necesite datos PROPIOS de la empresa
+  // (RFC, dirección de facturación, jerarquía), no solo agrupar por nombre.
+  company   String?
+  // Vendedor dueño de la relación. SetNull: dar de baja a alguien no borra sus clientes.
+  ownerId   String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner         User?          @relation("ContactOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   conversations Conversation[]
   listMembers   ContactListMember[]
   broadcastRows BroadcastRecipient[]
+  deals         Deal[]
+  tasks         Task[]
+  activities    Activity[]
+  tags          ContactTag[]
 
   @@unique([tenantId, platform, waId])
   @@index([tenantId])
   @@index([tenantId, phone])
+  @@index([tenantId, company])
+  @@index([tenantId, ownerId])
 }
 
 // Cartera de clientes (v5 feature 30). Un subconjunto CURADO de Contact, no una copia:
@@ -520,7 +589,9 @@ model Conversation {
   wabaConnection WabaConnection @relation(fields: [wabaConnectionId], references: [id], onDelete: Cascade)
   assignedUser   User?          @relation("AssignedAgent", fields: [assignedUserId], references: [id], onDelete: SetNull)
   messages       Message[]
-  notes          Note[]
+  // Las notas del hilo viven aquí desde el v8: `Note` se absorbió en `Activity` para que
+  // una nota escrita en la bandeja también se vea en la ficha del cliente.
+  activities     Activity[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -626,21 +697,223 @@ model ErrorLog {
   @@index([createdAt])
 }
 
-// Nota interna: visible para agentes, nunca se envía a WhatsApp.
-model Note {
-  id             String   @id @default(cuid())
-  tenantId       String
-  conversationId String
-  authorId       String
-  body           String
-  createdAt      DateTime @default(now())
+// --- CRM (v8) ---------------------------------------------------------------
+//
+// La separación que sostiene el lote entero: `Contact` es la PERSONA (datos fijos e
+// históricos) y `Deal` es la VENTA concreta que se le intenta cerrar ahora. A la misma
+// persona se le venden tres cosas en cinco años, cada una con su monto y su proceso.
+// Colgar el monto del contacto —o de la conversación— hace imposible la única pregunta
+// que justifica un CRM: ¿cuánto dinero hay en curso?
+//
+// Y `Conversation` NO sirve de trato aunque lo parezca (tiene estado, dueño y fecha): un
+// hilo es un canal, lleva la venta de marzo y la de septiembre, cerrarlo no es ganar
+// nada, y no tiene dónde poner $3,000. `ConversationStatus` se queda para lo que es.
 
-  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author       User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+// El embudo del negocio. Varias por tenant y no es adelantarse: quien instala paneles y
+// además vende mantenimiento tiene dos procesos con etapas distintas, y en un solo
+// tablero se mezclan dos embudos que no se comparan. Soportarlo ahora cuesta esta tabla;
+// añadirlo después cuesta migrar todos los Deal. La UI solo pinta el selector si hay >1.
+model Pipeline {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  stages Stage[]
+  deals  Deal[]
+
+  @@unique([tenantId, name])
   @@index([tenantId])
-  @@index([conversationId])
+}
+
+// Etapa ABIERTA del embudo. Ganado/perdido no están aquí: son `Deal.status`.
+model Stage {
+  id         String @id @default(cuid())
+  tenantId   String
+  pipelineId String
+  name       String
+  // SIN @@unique([pipelineId, position]): un unique obliga a valores temporales para
+  // intercambiar dos etapas. Reordenar reescribe TODAS las posiciones de la pipeline en
+  // una transacción, que es una query y no tiene estados intermedios que proteger.
+  position   Int
+  // Automatismo de etapa (feature 38): dos columnas, no un motor de reglas. Cubre "al
+  // mandar cotización, recuérdame llamar en 2 días" con cero infraestructura. El día que
+  // alguien pida condiciones o ramas, eso ES el orquestador v3 y no se construye dos veces.
+  autoTaskTitle String?
+  autoTaskDays  Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  deals    Deal[]
+
+  @@index([pipelineId, position])
+  @@index([tenantId])
+}
+
+model Deal {
+  id         String     @id @default(cuid())
+  tenantId   String
+  contactId  String
+  pipelineId String
+  stageId    String
+  title      String
+  // Decimal y no Float: es dinero. Sin columna de moneda — sale de `Tenant.currency`,
+  // que ya existe. Multi-moneda por trato cuando un tenant venda en dos.
+  amount     Decimal?   @db.Decimal(14, 2)
+  status     DealStatus @default(open)
+  // Obligatorio al marcar perdido (lo exige el servicio, no el esquema): es el dato más
+  // útil del CRM y el que nadie pone si es opcional. "Se fue con la competencia" tres
+  // veces seguidas es una decisión de precio esperando a que alguien la lea.
+  lostReason String?
+  // Nulable a propósito: un trato sin dueño lo ve TODO el equipo y el primero que llega
+  // lo reclama (ver `crm/deal-scope.ts`), igual que `agentScope` deja ver las
+  // conversaciones abiertas. Es también lo que crea la regla de alta automática.
+  ownerId    String?
+  expectedCloseAt DateTime?
+  // `status` y `closedAt` no pueden discrepar, así que los pone el mismo sitio y nunca
+  // el cliente: cerrar lo sella, reabrir lo borra.
+  closedAt   DateTime?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact    Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  pipeline   Pipeline   @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  // NoAction y NO Restrict, aunque el efecto buscado sea el mismo (no dejar tratos
+  // apuntando a una etapa que ya no existe: borrar una etapa con tratos exige decir a
+  // dónde van). Restrict se comprueba fila a fila y de inmediato, así que en un borrado
+  // en cascada —tirar un Tenant, o una Pipeline— si Postgres llega a `Stage` antes que a
+  // `Deal` la comprobación salta contra tratos que se están borrando en la MISMA
+  // sentencia, y el borrado del tenant falla. NoAction se difiere al final de la
+  // sentencia: para entonces los tratos ya no están y el diamante se resuelve.
+  stage      Stage      @relation(fields: [stageId], references: [id], onDelete: NoAction)
+  owner      User?      @relation("DealOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  tasks      Task[]
+  activities Activity[]
+
+  // Un índice por consulta real, no por si acaso.
+  @@index([tenantId, status])
+  @@index([tenantId, pipelineId, stageId]) // el tablero
+  @@index([tenantId, ownerId])             // alcance del agente
+  @@index([tenantId, contactId])           // la ficha del cliente
+}
+
+// La próxima acción con fecha. Sin enum de estado: `completedAt` nulo es pendiente, y
+// atrasada/hoy/próxima se DERIVAN de `dueAt` (`crm/tasks.buckets.ts`). Una columna de
+// estado sería una copia que se desincroniza sola al pasar la medianoche.
+model Task {
+  id             String    @id @default(cuid())
+  tenantId       String
+  title          String
+  type           TaskType  @default(call)
+  // Obligatorio: una tarea sin fecha no aparece en ninguna lista y por lo tanto no existe.
+  dueAt          DateTime
+  // NO nulable: una tarea de "alguien del equipo" no la hace nadie, que es justo el
+  // trato huérfano que este lote existe para evitar.
+  assignedUserId String
+  contactId      String?
+  dealId         String?
+  completedAt    DateTime?
+  // "¿Qué pasó?" en el momento de cerrar, que es cuando se tiene la respuesta en la
+  // cabeza. Se copia a la Activity del cierre.
+  outcome        String?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedUser User       @relation("TaskAssignee", fields: [assignedUserId], references: [id], onDelete: Cascade)
+  createdBy    User?      @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  contact      Contact?   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  deal         Deal?      @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  activities   Activity[]
+
+  // El orden de las columnas importa: es exactamente "mis tareas pendientes por fecha",
+  // la única consulta que corre en cada carga de pantalla.
+  @@index([tenantId, assignedUserId, completedAt, dueAt])
+  @@index([tenantId, dealId])
+  @@index([tenantId, contactId])
+}
+
+// El timeline por contacto, append-only. Absorbe la vieja `Note`: dejarlas separadas
+// daba dos sistemas de notas, y una nota escrita en la bandeja no aparecería en la ficha
+// del cliente, que es justo donde el vendedor va a buscarla.
+//
+// Los MENSAJES no entran: el timeline es la columna de "qué pasó" y el chat va al lado,
+// embebido. Unir Message con Activity en una consulta paginada es SQL caro para pintar
+// dos veces lo mismo, y el hilo ya sabe paginarse solo.
+model Activity {
+  id             String       @id @default(cuid())
+  tenantId       String
+  type           ActivityType
+  // OBLIGATORIO: el timeline es por contacto y siempre hay uno (un trato cuelga de un
+  // contacto y una conversación también). Nulable, la consulta del timeline tendría que
+  // hacer OR con dos joins.
+  contactId      String
+  dealId         String?
+  conversationId String?
+  taskId         String?
+  // null = lo hizo el sistema. No hay usuario ficticio "Sistema": un User que no puede
+  // entrar contamina GET /users, la asignación de conversaciones y el borrado de usuarios
+  // — el mismo argumento con el que la 33 no crea usuarios pendientes.
+  authorId       String?
+  body           String?
+  // Lo que solo se renderiza: {from,to} en un stage_change, {amount} en un deal_won.
+  // Mismo criterio que `Message.payload`: si no se filtra ni se ordena por ello, no es
+  // columna.
+  data           Json?
+  // Cuándo PASÓ, que no es cuándo se escribió: una llamada se registra después de
+  // ocurrir. El timeline ordena por esto; la auditoría necesita `createdAt`.
+  occurredAt     DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact      Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  deal         Deal?         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  task         Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  author       User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, contactId, occurredAt])
+  @@index([tenantId, dealId, occurredAt])
+  // La bandeja lista las notas de un hilo por este camino.
+  @@index([conversationId, type])
+}
+
+// Etiqueta para DESCRIBIR y FILTRAR. No autoriza nada: decidir *a quién le envío* sigue
+// siendo de `ContactList` (carteras), que tiene acceso por rol y es la única fuente de
+// destinatarios de masivos. Conviene no volver a mezclar las dos cosas.
+model Tag {
+  id       String @id @default(cuid())
+  tenantId String
+  name     String
+  // Token del sistema de diseño, no un hex libre: con hex libre el tenant elige un gris
+  // sobre gris y la etiqueta deja de leerse en tema oscuro.
+  color    String @default("neutral")
+  createdAt DateTime @default(now())
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contacts ContactTag[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model ContactTag {
+  contactId String
+  tagId     String
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  // Un contacto tiene o no tiene la etiqueta, no hay más estado.
+  @@id([contactId, tagId])
+  @@index([tagId])
 }
 
 // Respuesta rápida: plantilla de texto interna del tenant para la caja de envío.

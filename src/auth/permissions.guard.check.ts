@@ -71,6 +71,23 @@ async function run() {
   );
   await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
 
+  // CRM (v8): el agente SÍ opera el embudo —vender es su trabajo, y sin estos tres el
+  // lote queda invisible para quien lo iba a usar— pero NO lo configura. Si `deals:manage`
+  // entrara en la lista de sistema, en el próximo arranque todos los agentes de todos los
+  // tenants podrían reordenar etapas y borrar tratos (ensureSystemRoles solo AGREGA).
+  for (const k of ['deals:read', 'deals:write', 'tasks:write'] as const) {
+    assert.ok(SYSTEM_ROLE_PERMISSIONS.agent.includes(k), `agent debe traer ${k}`);
+  }
+  assert.ok(!SYSTEM_ROLE_PERMISSIONS.agent.includes('deals:manage'));
+  assert.ok(SYSTEM_ROLE_PERMISSIONS.admin.includes('deals:manage'));
+  // Y configurar el embudo es un permiso, no un chequeo de rol: quien puede operar tratos
+  // sigue recibiendo 403 al tocar la configuración.
+  g = new PermissionsGuard(
+    reflectorReturning(['deals:manage']),
+    prismaWithPerms(['deals:read', 'deals:write', 'tasks:write']),
+  );
+  await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
+
   console.log('permissions.guard.check OK');
 }
 

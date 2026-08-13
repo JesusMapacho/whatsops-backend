@@ -171,22 +171,41 @@ export class ConversationsService {
     return { id, status };
   }
 
+  // Las notas del hilo viven en `Activity` desde el v8 (feature 34): el modelo `Note`
+  // se absorbió ahí para que una nota escrita en la bandeja también aparezca en el
+  // timeline de la ficha del cliente. Estos dos métodos mantienen el CONTRATO de
+  // `GET/POST /conversations/:id/notes` intacto, así que la bandeja no cambia.
+  //
+  // El filtro por `type: 'note'` no es cosmético: `Activity` también recoge cambios de
+  // etapa y cierres de trato, y sin él el panel de notas del hilo se llenaría de eventos
+  // del CRM.
   async listNotes(tenantId: string, id: string, userId: string, role: string) {
     await this.assertAccess(tenantId, id, userId, role);
-    return this.prisma.note.findMany({
-      where: { conversationId: id, tenantId },
+    return this.prisma.activity.findMany({
+      where: { conversationId: id, tenantId, type: 'note' },
       include: { author: { select: { id: true, email: true } } },
-      orderBy: { createdAt: 'asc' },
+      // Por `occurredAt` y no `createdAt`: son iguales para una nota, pero el timeline
+      // ordena por cuándo pasó y las dos vistas tienen que contar lo mismo.
+      orderBy: { occurredAt: 'asc' },
     });
   }
 
   async addNote(tenantId: string, id: string, authorId: string, role: string, body: unknown) {
-    await this.assertAccess(tenantId, id, authorId, role);
+    // Devuelve la conversación, así que el `contactId` que `Activity` exige sale de aquí
+    // sin una segunda query.
+    const conv = await this.assertAccess(tenantId, id, authorId, role);
     if (typeof body !== 'string' || !body.trim()) {
       throw new BadRequestException('Campo requerido: body');
     }
-    return this.prisma.note.create({
-      data: { tenantId, conversationId: id, authorId, body: body.trim() },
+    return this.prisma.activity.create({
+      data: {
+        tenantId,
+        type: 'note',
+        contactId: conv.contactId,
+        conversationId: id,
+        authorId,
+        body: body.trim(),
+      },
       include: { author: { select: { id: true, email: true } } },
     });
   }

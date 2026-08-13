@@ -44,6 +44,38 @@ export const PERMISSION_CATALOG: PermissionMeta[] = [
     description:
       'Crear carteras, dar acceso por rol y dar de alta o baja contactos. Quién puede usar cada cartera se decide por rol en la cartera misma.',
   },
+  // --- CRM (v8 feature 34) ---
+  // El corte es el mismo que ya usan `contacts:read` / `contacts:manage`: OPERAR es de
+  // agente, CONFIGURAR es de admin. Un vendedor que reordena las etapas le cambia el
+  // proceso comercial al resto del equipo, y quien puede borrar tratos puede borrar el
+  // histórico con el que se calculan las métricas.
+  {
+    key: 'deals:read',
+    label: 'Ver el embudo',
+    group: 'Embudo',
+    description:
+      'Abrir el tablero de tratos, las fichas de cliente y la agenda. Un agente ve los tratos suyos y los que no tienen dueño.',
+  },
+  {
+    key: 'deals:write',
+    label: 'Operar tratos',
+    group: 'Embudo',
+    description:
+      'Crear tratos, editarlos, moverlos de etapa y cerrarlos como ganados o perdidos.',
+  },
+  {
+    key: 'tasks:write',
+    label: 'Operar tareas',
+    group: 'Embudo',
+    description: 'Crear tareas de seguimiento y completarlas anotando qué pasó.',
+  },
+  {
+    key: 'deals:manage',
+    label: 'Configurar el embudo',
+    group: 'Embudo',
+    description:
+      'Crear y reordenar etapas y embudos, gestionar el catálogo de etiquetas, borrar tratos, ver y reasignar los de todo el equipo, y el alta automática de tratos.',
+  },
   {
     key: 'waba:create',
     label: 'Gestionar conexiones',
@@ -103,7 +135,19 @@ export type PermissionKey = (typeof PERMISSION_CATALOG)[number]['key'];
 // real lo sigue acotando el rol en cada cartera (una sin enlaces no la ve nadie salvo
 // admin). `contacts:manage` no, por lo mismo que `conversations:outbound`: decidir a
 // quién guardamos como cliente y a quién se le puede escribir es de admin.
+//
+// Del CRM (v8), `agent` recibe los tres de operar —`deals:read`, `deals:write` y
+// `tasks:write`— porque vender ES el trabajo del agente: sin ellos el lote entero queda
+// invisible para quien lo iba a usar todos los días. `deals:manage` no, por lo mismo que
+// `contacts:manage`: configurar el proceso comercial y borrar histórico es de admin.
 export const SYSTEM_ROLE_PERMISSIONS: Record<'admin' | 'agent', PermissionKey[]> = {
   admin: PERMISSION_CATALOG.map((p) => p.key),
-  agent: ['conversations:read', 'conversations:write', 'contacts:read'],
+  agent: [
+    'conversations:read',
+    'conversations:write',
+    'contacts:read',
+    'deals:read',
+    'deals:write',
+    'tasks:write',
+  ],
 };
