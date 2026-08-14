@@ -13,6 +13,7 @@ import { applyReaction } from './mutations';
 import { fetchPayloadBinary, wahaMediaUrl } from '../waha/waha.url';
 import { openConversation, resolveContact } from '../messaging/contact-resolve';
 import { addToSystemList } from '../contacts/system-list';
+import { autoDealOnInbound } from '../crm/auto-deal';
 import { WEBHOOK_QUEUE } from './webhook.service';
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
@@ -138,6 +139,12 @@ export class WebhookProcessor extends WorkerHost {
     // único que el producto promete no perder.
     if (direction === 'in') {
       await addToSystemList(this.prisma, tenantId, contact.id, msg.isGroup);
+      // Alta automática de tratos (v8 feature 38), justo detrás y con la misma forma: solo
+      // entrantes, mejor esfuerzo, nunca lanza. Apagada por defecto (`Tenant.autoDealOnInbound`)
+      // y sin clasificar intención — no adivina si el mensaje es una oportunidad, crea una
+      // tarjeta por cada persona que escribe sin trato abierto. Eso lo decide el negocio al
+      // encender el interruptor.
+      await autoDealOnInbound(this.prisma, tenantId, contact.id, msg.isGroup);
     }
 
     // Red de seguridad de la duplicación: si el envío por la app no consiguió el

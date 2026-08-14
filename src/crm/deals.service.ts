@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { dealScope, dealScopeWhere } from './deal-scope';
 import { ensureDefaultPipeline } from './default-pipeline';
+import { anotacionDe, decidirTareaAuto } from './auto-task';
 import { ordenar, primeraEtapa, puedeBorrar, reordenar, StagesError } from './stages';
 import {
   DEALS_TAKE,
@@ -248,11 +249,16 @@ export class DealsService {
       src.ownerId === null ? null : typeof src.ownerId === 'string' && src.ownerId ? src.ownerId : userId;
     if (ownerId) await this.validarUsuario(tenantId, ownerId);
 
+    const timezone = await this.zonaDe(tenantId);
     const deal = await this.prisma.$transaction(async (tx) => {
       const d = await tx.deal.create({
         data: { tenantId, contactId, pipelineId: pipeline.id, stageId, title, amount, expectedCloseAt, ownerId },
         include: DEAL_INCLUDE,
       });
+      // La tarea automática dispara también AL CREAR, no solo al mover: el caso que más se usa
+      // es configurar la primera etapa («hacer llamada de primer contacto»), y sin esto esa
+      // configuración solo se aplicaría a tratos que alguien arrastre hacia atrás.
+      const auto = await this.crearTareaAuto(tx, tenantId, d, stageId, userId, timezone);
       // En la MISMA transacción que el trato: un timeline al que le falta el alta cuando
       // falla la segunda escritura no es un registro.
       await tx.activity.create({
@@ -262,7 +268,7 @@ export class DealsService {
           contactId,
           dealId: d.id,
           authorId: userId,
-          data: { to: d.stage.name },
+          data: { to: d.stage.name, ...(auto ? { tareaAuto: auto } : {}) },
         },
       });
       return d;
@@ -302,9 +308,14 @@ export class DealsService {
     }
     if (typeof data.ownerId === 'string') await this.validarUsuario(tenantId, data.ownerId);
 
+    const timezone = etapaNueva ? await this.zonaDe(tenantId) : null;
     const deal = await this.prisma.$transaction(async (tx) => {
       const d = await tx.deal.update({ where: { id }, data, include: DEAL_INCLUDE });
       if (etapaNueva) {
+        // Dentro de la MISMA transacción que el movimiento, al revés que en el worker del
+        // webhook: aquí hay una persona mirando que puede repetir la acción, así que es mejor
+        // que falle entero que a medias.
+        const auto = await this.crearTareaAuto(tx, tenantId, d, etapaNueva.id, userId, timezone);
         await tx.activity.create({
           data: {
             tenantId,
@@ -314,7 +325,9 @@ export class DealsService {
             authorId: userId,
             // `{from,to}` con los NOMBRES y no los ids: el timeline se lee después, y una
             // etapa renombrada o borrada dejaría el evento sin sentido si guardara ids.
-            data: { from: actual.stage.name, to: etapaNueva.name },
+            // `tareaAuto` cuenta si se creó la tarea de la etapa o por qué no, para que la
+            // omisión por falta de dueño no parezca un fallo silencioso.
+            data: { from: actual.stage.name, to: etapaNueva.name, ...(auto ? { tareaAuto: auto } : {}) },
           },
         });
       }
@@ -400,6 +413,68 @@ export class DealsService {
   }
 
   // --- privados ---
+
+  /**
+   * Crea la tarea de la etapa, si la etapa la tiene configurada y el trato tiene dueño.
+   *
+   * Lee la etapa AQUÍ en vez de recibirla: `ensureDefaultPipeline` no selecciona
+   * `autoTaskTitle`/`autoTaskDays`, así que confiar en lo que traiga el llamador dejaría el
+   * automatismo apagado en silencio justo para la pipeline por defecto — la que usa todo el
+   * mundo. Una consulta por PK a cambio de que no dependa de qué seleccionó cada camino.
+   *
+   * Devuelve lo que hay que anotar en el `Activity`, o `undefined` si no había nada que hacer.
+   */
+  private async crearTareaAuto(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    deal: { id: string; title: string; contactId: string; ownerId: string | null },
+    stageId: string,
+    userId: string,
+    timezone: string | null,
+  ): Promise<'creada' | 'sin-dueno' | undefined> {
+    const stage = await tx.stage.findUnique({
+      where: { id: stageId },
+      select: { name: true, autoTaskTitle: true, autoTaskDays: true },
+    });
+    if (!stage) return undefined;
+
+    const decision = decidirTareaAuto({
+      stage,
+      dealOwnerId: deal.ownerId,
+      dealTitle: deal.title,
+      ahora: new Date(),
+      timezone,
+    });
+    if (decision.crear) {
+      // No se deduplica por título a propósito: pasar dos veces por «Cotización enviada» son
+      // dos cotizaciones y dos seguimientos.
+      await tx.task.create({
+        data: {
+          tenantId,
+          title: decision.title,
+          type: decision.type,
+          dueAt: decision.dueAt,
+          assignedUserId: decision.assignedUserId,
+          contactId: deal.contactId,
+          dealId: deal.id,
+          // `createdById` es quien provocó el movimiento; en el alta automática del webhook es
+          // `null`, y ahí la columna es nulable justo para poder decir "lo hizo el sistema".
+          createdById: userId || null,
+        },
+      });
+    }
+    return anotacionDe(decision);
+  }
+
+  // La zona del negocio, para componer la fecha de la tarea automática en su hora de pared.
+  // ponytail: una lectura por PK cuando hay etapa nueva. Cachear cuando se note.
+  private async zonaDe(tenantId: string): Promise<string | null> {
+    const t = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { timezone: true },
+    });
+    return t?.timezone ?? null;
+  }
 
   private async resolverPipeline(tenantId: string, pedida: unknown) {
     if (typeof pedida === 'string' && pedida) {
