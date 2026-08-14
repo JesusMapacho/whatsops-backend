@@ -56,13 +56,31 @@ export class BranchBService implements OnModuleDestroy {
     return SCHEMA_DOCS.length;
   }
 
-  // Recupera el subconjunto de esquema más relevante a la pregunta (top-k por similitud).
+  /**
+   * Recupera el subconjunto de esquema más relevante a la pregunta (top-k por similitud).
+   *
+   * **Se niega si el índice está vacío**, en vez de devolver `[]`. Sin esto, `generateSql`
+   * armaría el prompt con «ESQUEMA:» y nada detrás, y el LLM inventaría nombres de tabla: en el
+   * mejor caso el guard AST los rechaza con un «tabla fuera de la allowlist» que no dice nada
+   * del problema real, y en el peor acierta con una tabla que existe y devuelve números
+   * plausibles y equivocados.
+   *
+   * Es un riesgo REAL y no teórico: el v8 cambió `schema-doc.ts` (la tabla `Note` desapareció y
+   * entraron las del CRM), así que un índice de antes de ese cambio está desfasado y hay que
+   * reindexar. Este freno es lo que convierte «olvidé reindexar» en un mensaje claro.
+   */
   async retrieve(question: string, k = 4): Promise<string[]> {
     const vec = vectorLiteral(await this.embed().embedQuery(question));
     const rows = await this.prisma.$queryRaw<{ content: string }[]>`
       SELECT content FROM schema_embedding
       ORDER BY embedding <=> ${vec}::vector
       LIMIT ${k}`;
+    if (!rows.length) {
+      throw new Error(
+        'El índice del esquema está vacío: no se puede consultar los datos sin él. ' +
+          'Corre `npx ts-node src/assistant/rag/index-schema.ts` en `backend/`.',
+      );
+    }
     return rows.map((r) => r.content);
   }
 
