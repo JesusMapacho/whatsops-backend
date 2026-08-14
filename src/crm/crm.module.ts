@@ -8,6 +8,8 @@ import { ActivitiesService } from './activities.service';
 import { DealsService } from './deals.service';
 import { TasksService } from './tasks.service';
 import { TasksController } from './tasks.controller';
+import { KpisService } from './kpis.service';
+import { KpisController } from './kpis.controller';
 import {
   ActivitiesController,
   CrmContactsController,
@@ -35,8 +37,9 @@ import { DealsController, PipelinesController, StagesController } from './deals.
     PipelinesController,
     StagesController,
     TasksController,
+    KpisController,
   ],
-  providers: [CrmContactsService, ActivitiesService, DealsService, TasksService],
+  providers: [CrmContactsService, ActivitiesService, DealsService, TasksService, KpisService],
   exports: [ActivitiesService, DealsService, TasksService],
 })
 export class CrmModule {}
