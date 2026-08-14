@@ -92,4 +92,42 @@ assert.strictEqual(atr.completadas, false);
 assert.strictEqual(rangoDeScope('todas', AHORA, MX).completadas, null);
 assert.strictEqual(rangoDeScope('hechas', AHORA, MX).completadas, true);
 
+// --- el día del cambio de horario de verano ------------------------------------------
+// El día de la transición dura 23 o 25 horas, así que "hoy + 24 h" desvía el corte una hora
+// y se lleva de cubo las tareas del borde. Madrid adelanta el último domingo de marzo
+// (2026-03-29, día de 23 h) y atrasa el último de octubre (2026-10-25, día de 25 h).
+const MADRID = 'Europe/Madrid';
+
+// 29 de marzo de 2026 a mediodía en Madrid. El inicio de mañana tiene que ser la medianoche
+// del 30, no 24 h después de la del 29.
+const marzo = rangoDeScope('hoy', new Date('2026-03-29T10:00:00Z'), MADRID);
+assert.strictEqual(marzo.desde!.toISOString(), '2026-03-28T23:00:00.000Z', 'medianoche del 29');
+assert.strictEqual(marzo.hasta!.toISOString(), '2026-03-29T22:00:00.000Z', 'medianoche del 30');
+// La prueba de que el día midió 23 h y no 24: con la suma ingenua habría dado 23:00Z.
+assert.strictEqual(
+  (marzo.hasta!.getTime() - marzo.desde!.getTime()) / 3_600_000,
+  23,
+  'el día de marzo dura 23 h',
+);
+
+// 25 de octubre de 2026: día de 25 h.
+const octubre = rangoDeScope('hoy', new Date('2026-10-25T10:00:00Z'), MADRID);
+assert.strictEqual(
+  (octubre.hasta!.getTime() - octubre.desde!.getTime()) / 3_600_000,
+  25,
+  'el día de octubre dura 25 h',
+);
+
+// Y los cubos siguen encajando sin hueco ni solape también en la transición.
+assert.strictEqual(
+  rangoDeScope('proximas', new Date('2026-03-29T10:00:00Z'), MADRID).desde!.toISOString(),
+  marzo.hasta!.toISOString(),
+);
+// Una tarea a las 23:30 del día que dura 23 h sigue siendo de HOY.
+assert.strictEqual(
+  bucket(tarea('2026-03-29T21:30:00Z'), new Date('2026-03-29T10:00:00Z'), MADRID),
+  'hoy',
+  '23:30 local del día de la transición es hoy',
+);
+
 console.log('crm/tasks.buckets.check OK');

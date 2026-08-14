@@ -100,13 +100,21 @@ export class AuthService {
         lastName: true,
         emailVerified: true,
         phoneVerified: true,
-        tenant: { select: { onboardingComplete: true } },
+        // `timezone` y `currency` los usa el CRM (v8): la agenda corta el día en la zona del
+        // negocio, no en la del navegador, y los importes se formatean con su moneda. Van
+        // aquí y no en tres peticiones porque los piden tres pantallas distintas.
+        tenant: { select: { onboardingComplete: true, timezone: true, currency: true } },
       },
     });
     if (!user) throw new UnauthorizedException('Usuario no encontrado');
     const permissions = await this.roles.permissionKeysFor(user.role, user.roleId);
     const { tenant, ...rest } = user;
-    return { ...rest, onboardingComplete: tenant?.onboardingComplete ?? true, permissions };
+    return {
+      ...rest,
+      onboardingComplete: tenant?.onboardingComplete ?? true,
+      tenant: { timezone: tenant?.timezone ?? null, currency: tenant?.currency ?? null },
+      permissions,
+    };
   }
 
   // Pública porque también la usa InvitationsService: aceptar una invitación crea

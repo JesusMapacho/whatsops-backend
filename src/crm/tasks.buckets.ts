@@ -88,7 +88,14 @@ export function rangoDeScope(
   timezone?: string | null,
 ): { desde?: Date; hasta?: Date; completadas: boolean | null } {
   const inicioDeHoy = inicioDelDia(ahora, timezone);
-  const inicioDeManana = new Date(inicioDeHoy.getTime() + 24 * 60 * 60 * 1000);
+  // El inicio de mañana NO es "hoy + 24 h": el día del cambio de horario de verano dura 23 o
+  // 25 horas, así que sumar 24 desvía el corte una hora y mueve de cubo las tareas del borde
+  // (una de las 23:30 acabaría en «próximas»). Se salta a media tarde de mañana —+36 h cae
+  // dentro de mañana con cualquier transición— y se vuelve a pedir su medianoche.
+  const inicioDeManana = inicioDelDia(
+    new Date(inicioDeHoy.getTime() + 36 * 60 * 60 * 1000),
+    timezone,
+  );
   switch (scope) {
     case 'atrasadas':
       return { hasta: inicioDeHoy, completadas: false };
@@ -118,6 +125,34 @@ export function inicioDelDia(ahora: Date, timezone?: string | null): Date {
   const medianocheComoUtc = new Date(`${dia}T00:00:00Z`);
   const desplazamiento = desplazamientoMs(medianocheComoUtc, timezone);
   return new Date(medianocheComoUtc.getTime() - desplazamiento);
+}
+
+/** La hora por defecto de una tarea sin hora: nueve de la mañana del día del tenant. */
+export const HORA_POR_DEFECTO = '09:00';
+
+/**
+ * Instante UTC de una hora de pared del tenant: `'2026-08-20'` + `'11:00'` → `Date`.
+ *
+ * Sin hora se usan las **09:00 del día del tenant**, no del servidor: «llamar el jueves» no
+ * lleva hora, pero necesita un instante para ordenar dentro de «Hoy», y si se compusiera con
+ * la hora del servidor una tarea creada desde otro huso caería en el día equivocado.
+ *
+ * La corrección se aplica **dos veces** a propósito. El desplazamiento de la zona depende
+ * del instante, y el instante es lo que estamos calculando: con una sola pasada, una hora
+ * cercana a un cambio de horario de verano se compone con el desplazamiento del lado
+ * equivocado de la transición y sale desviada una hora. La segunda pasada usa ya el
+ * desplazamiento del instante correcto.
+ */
+export function componerDueAt(
+  fecha: string,
+  hora: string | null | undefined,
+  timezone?: string | null,
+): Date {
+  const hhmm = /^\d{2}:\d{2}$/.test(hora ?? '') ? (hora as string) : HORA_POR_DEFECTO;
+  const comoUtc = new Date(`${fecha}T${hhmm}:00Z`);
+  if (Number.isNaN(comoUtc.getTime())) throw new Error(`Fecha inválida: ${fecha}`);
+  const primera = new Date(comoUtc.getTime() - desplazamientoMs(comoUtc, timezone));
+  return new Date(comoUtc.getTime() - desplazamientoMs(primera, timezone));
 }
 
 // Desplazamiento de la zona respecto a UTC, en ms, para un instante dado.
