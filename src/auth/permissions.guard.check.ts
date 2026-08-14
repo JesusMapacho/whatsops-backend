@@ -88,6 +88,22 @@ async function run() {
   );
   await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
 
+  // `analytics:read` pasó a exigirse en `metrics-negocio.controller.ts`, donde antes no había
+  // guard y por tanto la portada la veía cualquiera. El agente TIENE que traerlo de fábrica: sin
+  // él, aplicar el guard le quita una pantalla que hoy usa, y la feature 38 da por hecho que la
+  // ve (con sus propios números, que eso lo acota el alcance, no el permiso).
+  assert.ok(
+    SYSTEM_ROLE_PERMISSIONS.agent.includes('analytics:read'),
+    'agent debe traer analytics:read o pierde la portada al aplicarse el guard',
+  );
+  // Y sigue siendo un permiso de verdad: un rol a medida sin él recibe 403 aunque opere
+  // conversaciones. Es lo que hace que desmarcar «Ver métricas» signifique algo.
+  g = new PermissionsGuard(
+    reflectorReturning(['analytics:read']),
+    prismaWithPerms(['conversations:read', 'conversations:write']),
+  );
+  await assert.rejects(() => g.canActivate(ctx({ role: 'agent', roleId: 'r1' })));
+
   console.log('permissions.guard.check OK');
 }
 

@@ -140,6 +140,16 @@ export type PermissionKey = (typeof PERMISSION_CATALOG)[number]['key'];
 // `tasks:write`— porque vender ES el trabajo del agente: sin ellos el lote entero queda
 // invisible para quien lo iba a usar todos los días. `deals:manage` no, por lo mismo que
 // `contacts:manage`: configurar el proceso comercial y borrar histórico es de admin.
+// `analytics:read` entra en `agent` al empezar a exigirse de verdad en
+// `metrics-negocio.controller.ts`. Estaba en el catálogo y en ningún guard, así que hasta ahora
+// TODO el mundo veía la portada: sin esta línea, aplicar el guard se la quitaría a los agentes
+// —que es justo lo contrario de lo que hace hoy el producto, y lo que la feature 38 da por
+// hecho al decir que el agente ve sus propios números—. `ensureSystemRoles` corre en cada
+// arranque y solo AGREGA, así que los agentes que ya existen lo reciben sin migración.
+//
+// Los roles A MEDIDA no se tocan a propósito: si un admin dejó «Ver métricas» sin marcar,
+// expresó una intención, y el guard nuevo por fin la respeta. Concederlo por detrás sería darle
+// un acceso que alguien intentó negar, que es el error más caro de los dos.
 export const SYSTEM_ROLE_PERMISSIONS: Record<'admin' | 'agent', PermissionKey[]> = {
   admin: PERMISSION_CATALOG.map((p) => p.key),
   agent: [
@@ -149,5 +159,6 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<'admin' | 'agent', PermissionKey[]>
     'deals:read',
     'deals:write',
     'tasks:write',
+    'analytics:read',
   ],
 };
