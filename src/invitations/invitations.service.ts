@@ -206,9 +206,9 @@ export class InvitationsService {
         });
         return creado;
       });
-      // Misma forma de respuesta que POST /auth/login: el frontend guarda la sesión
-      // con el código que ya tiene, y cuando v6 mueva el JWT a cookie esto se mueve
-      // con él sin tocar aquí.
+      // Misma forma que POST /auth/login, y por eso el controlador puede emitir la cookie
+      // de sesión con el mismo `openSession()` (v6 feature 31): el token no sale de aquí
+      // al navegador, sale por `Set-Cookie`.
       return this.auth.sign(
         user.id,
         user.tenantId,

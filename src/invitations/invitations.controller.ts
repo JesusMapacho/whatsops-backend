@@ -1,8 +1,9 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Res } from '@nestjs/common';
 import { InvitationsService } from './invitations.service';
 import { RequirePermissions } from '../auth/permissions.decorator';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
+import { CookieSink, openSession } from '../auth/session-cookie';
 
 @Controller('invitations')
 export class InvitationsController {
@@ -42,9 +43,15 @@ export class InvitationsController {
     return this.invitations.preview(token);
   }
 
+  // Aceptar deja la sesión abierta, y desde la feature 31 eso significa emitir la cookie
+  // aquí también: es la tercera puerta que abre sesión.
   @Public()
   @Post('token/:token/accept')
-  accept(@Param('token') token: string, @Body() body: any) {
-    return this.invitations.accept(token, body);
+  async accept(
+    @Param('token') token: string,
+    @Body() body: any,
+    @Res({ passthrough: true }) res: CookieSink,
+  ) {
+    return openSession(res, await this.invitations.accept(token, body));
   }
 }

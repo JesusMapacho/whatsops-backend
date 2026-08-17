@@ -25,6 +25,7 @@ import { AssistantModule } from './assistant/assistant.module';
 import { BrandingModule } from './branding/branding.module';
 import { WahaModule } from './waha/waha.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
+import { CsrfGuard } from './auth/csrf.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { PermissionsGuard } from './auth/permissions.guard';
 
@@ -71,7 +72,10 @@ import { PermissionsGuard } from './auth/permissions.guard';
   controllers: [HealthController],
   providers: [
     // Orden importa: primero autentica (pone req.user), luego rol, luego permiso.
+    // El CSRF va tras autenticar a propósito: así una petición sin sesión da 401 (que es
+    // lo que pasa) y no un 403 de token que despista al depurar.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: CsrfGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
   ],

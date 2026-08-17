@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { IS_PUBLIC } from './public.decorator';
 import { AuthUser } from './current-user.decorator';
+import { SESSION_COOKIE, readCookie } from './session-cookie';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -24,10 +25,12 @@ export class JwtAuthGuard implements CanActivate {
     if (isPublic) return true;
 
     const req = ctx.switchToHttp().getRequest();
-    const auth: string = req.headers.authorization ?? '';
-    const [scheme, token] = auth.split(' ');
-    if (scheme !== 'Bearer' || !token) {
-      throw new UnauthorizedException('Falta token Bearer');
+    // Solo cookie (v6 feature 31). El `Authorization: Bearer` se retiró con el mismo
+    // commit que lo dejó de mandar el frontend: dejarlo abierto habría mantenido viva
+    // la vía que la feature viene a cerrar.
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+    if (!token) {
+      throw new UnauthorizedException('Falta la cookie de sesión');
     }
     try {
       const payload = await this.jwt.verifyAsync(token);
