@@ -55,6 +55,9 @@ import { StatusController } from './status.controller';
     BroadcastProcessor,
     StatusService,
   ],
-  exports: [ConversationsService],
+  // MessagingService sale desde el v3: los nodos `message.send` y `templates.sync` del
+  // orquestador lo ENVUELVEN, para que la ventana de 24 h y los topes se apliquen una sola
+  // vez y en un solo sitio.
+  exports: [ConversationsService, MessagingService],
 })
 export class MessagingModule {}

@@ -24,6 +24,7 @@ import { OnboardingModule } from './onboarding/onboarding.module';
 import { AssistantModule } from './assistant/assistant.module';
 import { BrandingModule } from './branding/branding.module';
 import { WahaModule } from './waha/waha.module';
+import { AutomationsModule } from './automations/automations.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { CsrfGuard } from './auth/csrf.guard';
 import { RolesGuard } from './auth/roles.guard';
@@ -68,6 +69,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     AssistantModule,
     BrandingModule,
     WahaModule,
+    AutomationsModule,
   ],
   controllers: [HealthController],
   providers: [

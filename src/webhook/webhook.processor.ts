@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Job } from 'bullmq';
+import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
+import { Job, Queue } from 'bullmq';
 import type { WabaConnection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
@@ -14,7 +14,16 @@ import { fetchPayloadBinary, wahaMediaUrl } from '../waha/waha.url';
 import { openConversation, resolveContact } from '../messaging/contact-resolve';
 import { addToSystemList } from '../contacts/system-list';
 import { autoDealOnInbound } from '../crm/auto-deal';
+import { triggerOnInbound } from '../automations/trigger-on-inbound';
+import { AUTOMATION_QUEUE } from '../automations/automations.queue';
 import { WEBHOOK_QUEUE } from './webhook.service';
+
+// Texto del payload normalizado, para los triggers por palabra clave. Un adjunto sin pie de
+// foto no tiene texto y eso es correcto: no dispara una palabra clave.
+function textoDe(payload: unknown): string {
+  const p = (payload ?? {}) as any;
+  return typeof p?.text?.body === 'string' ? p.text.body : (typeof p?.caption === 'string' ? p.caption : '');
+}
 
 const MEDIA_TYPES = new Set<string>(['image', 'document', 'audio', 'video', 'sticker']);
 const ALLOWED_STATUS = new Set<string>(['sent', 'delivered', 'read', 'failed']);
@@ -34,6 +43,9 @@ export class WebhookProcessor extends WorkerHost {
     private readonly events: EventsGateway,
     private readonly crypto: CryptoService,
     private readonly storage: StorageService,
+    // Solo la cola, no el módulo del orquestador: este worker ENCOLA y no ejecuta nada de
+    // una automatización (mismo motivo por el que `triggerOnInbound` es función libre).
+    @InjectQueue(AUTOMATION_QUEUE) private readonly automationQueue: Queue,
     config: ConfigService,
   ) {
     super();
@@ -189,6 +201,21 @@ export class WebhookProcessor extends WorkerHost {
       'message:new',
       withMediaUrl(created, (k) => this.storage.signedUrl(k)),
     );
+
+    // Automatizaciones (v3 feature 18). Va AQUÍ, con el mensaje ya guardado y emitido: la
+    // bandeja no espera a que el orquestador decida nada. Misma forma que `autoDealOnInbound`
+    // —solo entrantes, mejor esfuerzo, nunca lanza— y el trabajo real se hace en la cola del
+    // orquestador, no en este worker.
+    if (direction === 'in') {
+      await triggerOnInbound(this.prisma, this.automationQueue, {
+        tenantId,
+        conversationId: conversation.id,
+        contacto: { id: contact.id, name: contact.name, waId: contact.waId },
+        texto: textoDe(payload),
+        wamid: msg.wamid ?? null,
+        esGrupo: msg.isGroup === true,
+      });
+    }
   }
 
   // Descarga el binario de Meta y lo guarda; devuelve el payload normalizado

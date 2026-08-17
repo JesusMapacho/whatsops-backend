@@ -76,6 +76,17 @@ export const PERMISSION_CATALOG: PermissionMeta[] = [
     description:
       'Crear y reordenar etapas y embudos, gestionar el catálogo de etiquetas, borrar tratos, ver y reasignar los de todo el equipo, y el alta automática de tratos.',
   },
+  // --- Orquestador (v3 feature 17) ---
+  // Uno solo, y de admin, incluido LEER: un grafo lleva dentro qué se le contesta a quién y
+  // a qué agente se le asigna, y quien puede editarlo le cambia el comportamiento del canal
+  // a todo el equipo sin pasar por la bandeja. Mismo corte que `deals:manage`.
+  {
+    key: 'automations:manage',
+    label: 'Gestionar automatizaciones',
+    group: 'Automatizaciones',
+    description:
+      'Crear, editar, activar y disparar automatizaciones, y ver su historial de ejecución.',
+  },
   {
     key: 'waba:create',
     label: 'Gestionar conexiones',

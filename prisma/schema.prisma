@@ -83,6 +83,28 @@ enum TaskType {
 // Lo que puede aparecer en el timeline de un contacto. Los tres primeros los registra
 // una persona (allowlist de `POST /activities`); el resto los escribe el servidor
 // cuando pasan — si el cliente pudiera inyectarlos, el timeline sería un cuento.
+// --- Orquestador (v3 feature 17) ---
+
+// `draft` no dispara. Es el interruptor entero: una automatización a medias que ya está
+// mandando mensajes es el peor fallo posible de este lote.
+enum AutomationStatus {
+  draft
+  active
+}
+
+enum AutomationRunStatus {
+  running
+  waiting
+  done
+  failed
+}
+
+enum StepStatus {
+  ok
+  failed
+  skipped
+}
+
 enum ActivityType {
   note
   call
@@ -141,6 +163,11 @@ model Tenant {
   tasks           Task[]
   activities      Activity[]
   tags            Tag[]
+  automations     Automation[]
+  automationNodes AutomationNode[]
+  automationEdges AutomationEdge[]
+  automationRuns  AutomationRun[]
+  automationSteps AutomationRunStep[]
 }
 
 // Método de pago de la suscripción a WhatsOps. NUNCA guarda el PAN: solo
@@ -278,6 +305,7 @@ model User {
   assignedTasks       Task[]     @relation("TaskAssignee")
   createdTasks        Task[]     @relation("TaskCreator")
   activities          Activity[]
+  automations         Automation[] @relation("AutomationActor")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -914,6 +942,146 @@ model ContactTag {
   // Un contacto tiene o no tiene la etiqueta, no hay más estado.
   @@id([contactId, tagId])
   @@index([tagId])
+}
+
+// --- Orquestador de automatizaciones (v3 features 17-18) ---
+
+// El grafo. `trigger` es Json y no columnas porque cada tipo de disparo lleva una config
+// distinta (palabra clave, cron, nada) y el catálogo la valida: columnas serían una matriz
+// de nulos que hay que migrar cada vez que se agrega un trigger.
+model Automation {
+  id       String           @id @default(cuid())
+  tenantId String
+  name     String
+  status   AutomationStatus @default(draft)
+  trigger  Json // { type: <key del catálogo>, config: {...} }
+  // Quién ejecuta. Los servicios que envuelven los nodos (`DealsService.create`,
+  // `ConversationsService.assign`…) exigen un usuario: lo usan como dueño por defecto y
+  // como autor del `Activity`. El motor no tiene sesión, así que actúa como el admin que
+  // activó la automatización — y así el timeline dice quién puso esto en marcha.
+  //
+  // SetNull y no Cascade: borrar al admin no borra el proceso de negocio. El run falla con
+  // un error legible («la automatización no tiene actor») y alguien decide, en vez de que
+  // desaparezcan las automatizaciones del negocio al dar de baja a una persona.
+  actorUserId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor  User?            @relation("AutomationActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  nodes  AutomationNode[]
+  edges  AutomationEdge[]
+  runs   AutomationRun[]
+
+  @@unique([tenantId, name])
+  // El barrido de triggers en el worker del webhook: solo las activas del tenant.
+  @@index([tenantId, status])
+}
+
+model AutomationNode {
+  id           String @id @default(cuid())
+  tenantId     String
+  automationId String
+  // Key del catálogo (`message.send`, `logic.condition`…). String y no enum: el catálogo
+  // es código versionado y agregar un tipo no puede pedir una migración.
+  type   String
+  config Json
+  // Posición en el canvas de la feature 19. Vive aquí y no en un blob aparte porque mover
+  // una caja es una escritura del nodo, no de todo el grafo.
+  x Int @default(0)
+  y Int @default(0)
+  // El nodo por el que empieza el run. Uno por automatización, lo garantiza el servicio.
+  isRoot    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  automation Automation       @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  from       AutomationEdge[] @relation("EdgeFrom")
+  to         AutomationEdge[] @relation("EdgeTo")
+  steps      AutomationRunStep[]
+
+  @@index([automationId])
+  @@index([tenantId])
+}
+
+model AutomationEdge {
+  id           String @id @default(cuid())
+  tenantId     String
+  automationId String
+  fromNodeId   String
+  toNodeId     String
+  // Etiqueta de rama: `true`/`false` en una condición, el caso en un switch, null en un
+  // enlace simple. Es lo que el motor compara con la salida del nodo.
+  branch    String?
+  createdAt DateTime @default(now())
+
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  automation Automation     @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  fromNode   AutomationNode @relation("EdgeFrom", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNode     AutomationNode @relation("EdgeTo", fields: [toNodeId], references: [id], onDelete: Cascade)
+
+  // Dos aristas iguales desde la misma salida son un empate que el motor tendría que
+  // romper adivinando.
+  @@unique([fromNodeId, branch])
+  @@index([automationId])
+  @@index([tenantId])
+}
+
+model AutomationRun {
+  id             String              @id @default(cuid())
+  tenantId       String
+  automationId   String
+  conversationId String?
+  status         AutomationRunStatus @default(running)
+  // Lo que el run va acumulando (el mensaje que lo disparó, salidas de nodos). Es el dato
+  // sobre el que evalúan los comparadores.
+  context       Json    @default("{}")
+  currentNodeId String?
+  error         String?
+  // Copia de `conversationId` que SOLO vale mientras el run está vivo, y se pone a null al
+  // terminar. Existe para que "un run activo por conversación" lo imponga la base con el
+  // unique de abajo: Prisma no da uniques parciales, y un `findFirst` antes de crear es
+  // una carrera con dos mensajes que llegan juntos — exactamente el caso real.
+  activeConversationId String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tenant     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  automation Automation          @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  steps      AutomationRunStep[]
+
+  @@unique([tenantId, activeConversationId])
+  @@index([tenantId, status])
+  @@index([automationId])
+}
+
+// Log de ejecución: una fila por nodo ejecutado. Es lo que se mira cuando alguien pregunta
+// «¿por qué le mandó eso a mi cliente?».
+model AutomationRunStep {
+  id       String     @id @default(cuid())
+  tenantId String
+  runId    String
+  nodeId   String
+  status   StepStatus
+  input    Json?
+  output   Json?
+  error    String?
+  createdAt DateTime  @default(now())
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  run    AutomationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  node   AutomationNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  // La idempotencia del motor: un reintento de BullMQ choca aquí en vez de repetir el
+  // efecto (mandar el mensaje dos veces).
+  //
+  // ponytail: efecto lateral deliberado — un grafo NO puede pasar dos veces por el mismo
+  // nodo en esta versión. El día que haga falta un bucle, la clave pasa a llevar el número
+  // de vuelta y el motor lo incrementa al reentrar.
+  @@unique([runId, nodeId])
+  @@index([runId])
+  @@index([tenantId])
 }
 
 // Respuesta rápida: plantilla de texto interna del tenant para la caja de envío.
