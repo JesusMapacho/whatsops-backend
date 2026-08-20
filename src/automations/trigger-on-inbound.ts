@@ -11,7 +11,7 @@ import { Logger } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { contextoDeMensaje } from './contexto';
-import { evaluarEntrante } from './triggers';
+import { especificidad, evaluarEntrante } from './triggers';
 import { crearRun } from './automations.service';
 
 const logger = new Logger('AutomationTrigger');
@@ -53,8 +53,14 @@ export async function triggerOnInbound(
       return;
     }
 
+    // `orderBy` explícito y no el que salga: sin él Postgres devuelve el orden físico del
+    // heap, y como un UPDATE reescribe la fila al final, cuál de dos automatizaciones
+    // respondía cambiaba solo porque habías editado la otra. Indefinido de verdad, no
+    // «indefinido pero en la práctica estable». Aquí fija el desempate entre iguales, y la
+    // preferencia de verdad la pone `especificidad` más abajo.
     const activas = await prisma.automation.findMany({
       where: { tenantId: entrante.tenantId, status: 'active' },
+      orderBy: { createdAt: 'asc' },
       select: { id: true, trigger: true },
     });
     if (!activas.length) return;
@@ -63,13 +69,16 @@ export async function triggerOnInbound(
     // contexto como `disparador.palabra`, y aquí es el único sitio donde se conoce.
     const candidatas = activas
       .map((a) => ({ a, disparo: evaluarEntrante(a.trigger, { texto: entrante.texto, esGrupo: entrante.esGrupo }) }))
-      .filter((c) => c.disparo.dispara);
+      .filter((c) => c.disparo.dispara)
+      // La MÁS ESPECÍFICA primero: una palabra clave gana a «entra un mensaje». `sort` es
+      // estable, así que entre dos igual de específicas manda el `orderBy` de arriba.
+      .sort((x, y) => especificidad(y.a.trigger) - especificidad(x.a.trigger));
+
     if (!candidatas.length) return;
 
-    // Solo la PRIMERA que coincide. Un mensaje que dispara tres automatizaciones a la vez
-    // son tres respuestas automáticas al mismo cliente, y además solo cabe un run activo por
-    // conversación (lo impone la unique de la base). Que el orden lo decida la más reciente
-    // es discutible; que se manden tres mensajes, no.
+    // Solo la PRIMERA. Un mensaje que dispara tres automatizaciones a la vez son tres
+    // respuestas automáticas al mismo cliente, y además solo cabe un run activo por
+    // conversación (lo impone la unique de la base).
     const elegida = candidatas[0];
     const run = await crearRun(prisma, {
       tenantId: entrante.tenantId,

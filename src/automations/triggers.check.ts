@@ -1,6 +1,6 @@
 // Check de los disparadores (v3 feature 18). Correr: npx ts-node src/automations/triggers.check.ts
 import * as assert from 'node:assert';
-import { evaluarEntrante, patronCron } from './triggers';
+import { especificidad, evaluarEntrante, patronCron } from './triggers';
 
 // Azúcar para los casos donde solo importa el sí/no.
 const dispara = (raw: unknown, ev: { texto: string; esGrupo: boolean }) => evaluarEntrante(raw, ev).dispara;
@@ -55,5 +55,38 @@ assert.ok(!dispara(null, entrante('hola')), 'trigger corrupto no dispara');
 assert.strictEqual(patronCron({ type: 'schedule.cron', config: { patron: '0 9 * * 1' } }), '0 9 * * 1');
 assert.strictEqual(patronCron({ type: 'schedule.cron', config: {} }), null);
 assert.strictEqual(patronCron({ type: 'message.inbound' }), null);
+
+// --- especificidad: quién gana cuando un mensaje casa con varias ---------------------
+//
+// Esto reproduce un fallo real: una automatización con «entra un mensaje» se comía los
+// mensajes de otra con palabra clave. Las dos se veían activas y correctas en la pantalla,
+// no había error en ninguna parte, y la de la palabra clave no aparecía nunca en las
+// ejecuciones. Si alguien invierte este orden, vuelve el mismo síntoma sin ninguna pista.
+assert.ok(
+  especificidad({ type: 'message.keyword', config: { palabras: ['precio'] } }) >
+    especificidad({ type: 'message.inbound' }),
+  'una palabra clave es MÁS específica que «entra un mensaje»: un catch-all no puede tapar una regla concreta',
+);
+assert.strictEqual(especificidad({ type: 'message.inbound' }), 0);
+assert.strictEqual(especificidad(null), 0, 'un trigger ilegible no gana ningún empate');
+assert.strictEqual(especificidad({}), 0);
+
+// El desempate se ordena así en `trigger-on-inbound.ts`; se comprueba aquí el criterio.
+const porEspecificidad = (ts: unknown[]) => [...ts].sort((x, y) => especificidad(y) - especificidad(x));
+assert.deepStrictEqual(
+  porEspecificidad([{ type: 'message.inbound' }, { type: 'message.keyword' }]).map((t: any) => t.type),
+  ['message.keyword', 'message.inbound'],
+  'la de palabra clave se evalúa primero aunque venga después en la lista',
+);
+// `sort` es estable: entre dos igual de específicas se respeta el orden de entrada, que es
+// el `orderBy: { createdAt: 'asc' }` de la consulta.
+assert.deepStrictEqual(
+  porEspecificidad([
+    { type: 'message.keyword', config: { palabras: ['a'] } },
+    { type: 'message.keyword', config: { palabras: ['b'] } },
+  ]).map((t: any) => t.config.palabras[0]),
+  ['a', 'b'],
+  'entre iguales manda el orden de la consulta, no uno arbitrario',
+);
 
 console.log('triggers.check OK');

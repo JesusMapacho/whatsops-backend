@@ -83,6 +83,21 @@ export function evaluarEntrante(raw: unknown, evento: EventoEntrante): Disparo {
   }
 }
 
+/**
+ * Cuánto de ESPECÍFICO es un disparador de mensaje. Más alto gana el empate cuando un
+ * mensaje casa con varias automatizaciones activas y hay que elegir una sola.
+ *
+ * El orden importa por un fallo real y muy difícil de ver desde la pantalla: una
+ * automatización con «entra un mensaje» casa con TODO, así que se comía también los
+ * mensajes que eran de una con palabra clave. Desde la lista las dos se ven activas y
+ * correctas, no hay error en ninguna parte, y la de la palabra clave simplemente no
+ * aparece nunca en las ejecuciones. Un catch-all no puede tapar en silencio una regla
+ * concreta: quien escribe una palabra clave está siendo más explícito.
+ */
+export function especificidad(raw: unknown): number {
+  return leerTrigger(raw).type === 'message.keyword' ? 1 : 0;
+}
+
 /** Patrón cron de un trigger `schedule.cron`, o null si no lo es o no lo trae. */
 export function patronCron(raw: unknown): string | null {
   const trigger = leerTrigger(raw);
