@@ -56,3 +56,20 @@ export function redact(value: unknown, depth = 0): unknown {
   }
   return out;
 }
+
+// --- Rutas ---------------------------------------------------------------------------
+
+/**
+ * `POST /hooks/<token>` lleva el secreto **en la ruta**, no en el cuerpo. Sin esto, cualquier
+ * 404/409/413/415/429 sobre esa ruta persiste el token entero en `ErrorLog.path` — y como no
+ * hay sesión, `tenantId` queda a `null`, así que la fila cae en el bucket de plataforma que
+ * el super-admin lee **cross-tenant**. Con el token, cualquiera dispara la automatización.
+ */
+export function esRutaDeHook(path: string): boolean {
+  return /^\/hooks\/[^/]/.test(path);
+}
+
+/** La misma ruta con el token tapado. No toca ninguna otra. */
+export function redactPath(path: string): string {
+  return esRutaDeHook(path) ? '/hooks/' + REDACTED : path;
+}

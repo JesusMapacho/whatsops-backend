@@ -10,7 +10,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { catalogoPublico, nodeType, validarConfig, validarTrigger } from './catalog';
 import { problemasDelGrafo } from './graph';
 import { patronCron } from './triggers';
+import { NOMBRE_VAR } from './contexto';
 import { AUTOMATION_QUEUE } from './automations.queue';
+import { nuevoTokenDeHook, urlDelHook } from './hooks';
 
 const AUTOMATION_INCLUDE = {
   nodes: { orderBy: { createdAt: 'asc' } },
@@ -28,12 +30,83 @@ export class AutomationsService {
     return catalogoPublico();
   }
 
-  list(tenantId: string) {
-    return this.prisma.automation.findMany({
+  // --- Constantes del negocio (`{{ajustes.<name>}}`) ------------------------------------
+
+  variables(tenantId: string) {
+    return this.prisma.tenantVariable.findMany({
+      where: { tenantId },
+      select: { name: true, value: true },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  /**
+   * Reemplaza el juego entero. Es una pantalla con un botón de guardar, no un CRUD fila a
+   * fila; el mismo trato que `guardarGrafo` le da al grafo.
+   */
+  async guardarVariables(tenantId: string, body: unknown) {
+    const filas = Array.isArray(body) ? body : (body as { variables?: unknown })?.variables;
+    if (!Array.isArray(filas)) throw new BadRequestException('Se esperaba una lista de variables.');
+
+    const limpias: { name: string; value: string }[] = [];
+    for (const f of filas) {
+      const name = String((f as { name?: unknown })?.name ?? '').trim();
+      const value = String((f as { value?: unknown })?.value ?? '');
+      if (!name) continue; // una fila en blanco de la pantalla no es un error, se ignora
+      if (!NOMBRE_VAR.test(name)) {
+        throw new BadRequestException(
+          `«${name}» no vale como nombre: solo letras, números y guion bajo, empezando por letra.`,
+        );
+      }
+      if (limpias.some((v) => v.name === name)) throw new BadRequestException(`«${name}» está repetida.`);
+      limpias.push({ name, value });
+    }
+
+    // En una transacción: si se borra y falla el alta, el negocio se queda sin sus precios y
+    // las automatizaciones activas empiezan a mandar importes vacíos.
+    await this.prisma.$transaction([
+      this.prisma.tenantVariable.deleteMany({
+        where: { tenantId, name: { notIn: limpias.map((v) => v.name) } },
+      }),
+      ...limpias.map((v) =>
+        this.prisma.tenantVariable.upsert({
+          where: { tenantId_name: { tenantId, name: v.name } },
+          create: { tenantId, name: v.name, value: v.value },
+          update: { value: v.value },
+        }),
+      ),
+    ]);
+    return this.variables(tenantId);
+  }
+
+  /**
+   * La base pública de la API, para armar la URL de los hooks. Env y no derivado del `Host`
+   * de la petición: si no, quien entra por `http://localhost:3000` copia una URL de localhost
+   * a un sistema externo. Misma decisión que `WAHA_CALLBACK_URL`. No entra en la lista
+   * `REQUIRED` de `env.validation.ts`: rompería el arranque de todo despliegue existente por
+   * una función opcional.
+   */
+  private baseApi(): string {
+    return process.env.API_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 3000}`;
+  }
+
+  /**
+   * Fuera el token crudo, dentro la URL ya armada. Sin este mapeo, `hookToken` viajaría al
+   * navegador en cada listado por el simple hecho de existir la columna — estos dos métodos
+   * devolvían la fila de Prisma entera.
+   */
+  private sinToken<T extends { hookToken?: string | null }>(a: T) {
+    const { hookToken, ...resto } = a;
+    return { ...resto, hookUrl: urlDelHook(this.baseApi(), hookToken) };
+  }
+
+  async list(tenantId: string) {
+    const filas = await this.prisma.automation.findMany({
       where: { tenantId },
       orderBy: { updatedAt: 'desc' },
       include: { _count: { select: { runs: true, nodes: true } } },
     });
+    return filas.map((a) => this.sinToken(a));
   }
 
   async get(tenantId: string, id: string) {
@@ -42,7 +115,25 @@ export class AutomationsService {
       include: AUTOMATION_INCLUDE,
     });
     if (!a) throw new NotFoundException('Automatización no encontrada');
-    return a;
+    return this.sinToken(a);
+  }
+
+  /**
+   * Rota el token de la URL pública.
+   *
+   * **NO apaga la automatización**, a diferencia de guardar el grafo o cambiar el disparador:
+   * rotar una credencial no cambia lo que la automatización hace. Como en este archivo el
+   * patrón es «esto la baja a borrador», la excepción necesita estar escrita o alguien la
+   * «arregla». Lo que sí rompe es la integración que estuviera usando la URL vieja.
+   */
+  async regenerarHook(tenantId: string, id: string) {
+    await this.get(tenantId, id);
+    const a = await this.prisma.automation.update({
+      where: { id },
+      data: { hookToken: nuevoTokenDeHook() },
+      select: { hookToken: true },
+    });
+    return { hookUrl: urlDelHook(this.baseApi(), a.hookToken) };
   }
 
   async create(tenantId: string, body: unknown, userId: string) {
@@ -54,6 +145,9 @@ export class AutomationsService {
         tenantId,
         name,
         trigger: validarTrigger(src.trigger) as any,
+        // Siempre, sea cual sea el disparador: cuestan 24 bytes y evitan un paso extra
+        // cuando el operador cambia el disparador a webhook desde el editor.
+        hookToken: nuevoTokenDeHook(),
         // Quién la crea es quien la ejecutará. Se vuelve a fijar al activar, que es el
         // momento en que alguien se hace responsable de lo que va a mandar sola.
         actorUserId: userId,
@@ -238,7 +332,7 @@ export class AutomationsService {
       tenantId,
       automationId: a.id,
       conversationId,
-      contexto: await contextoDeConversacion(this.prisma, tenantId, conversationId),
+      contexto: await contextoDeConversacion(this.prisma, tenantId, conversationId, { tipo: 'manual' }),
     });
     if (!run) throw new BadRequestException('Ya hay una ejecución en curso para esa conversación.');
     await this.cola.add('run', { runId: run.id });
@@ -316,8 +410,20 @@ export async function contextoDeConversacion(
   prisma: PrismaService,
   tenantId: string,
   conversationId: string | null,
+  disparador: Record<string, unknown> = { tipo: 'manual' },
 ): Promise<Record<string, unknown>> {
-  if (!conversationId) return { mensaje: { texto: '', wamid: null }, contacto: {}, conversacion: { id: null }, nodos: {} };
+  if (!conversationId) {
+    // `contacto` con las claves a null y no `{}`: así un `ctx.contacto.id` desde el nodo de
+    // código da null en las dos ramas y no `undefined` en una sola.
+    return {
+      mensaje: { texto: '', wamid: null },
+      contacto: { id: null, nombre: null, waId: null },
+      conversacion: { id: null },
+      disparador,
+      nodos: {},
+      vars: {},
+    };
+  }
   const conv = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
     include: { contact: { select: { id: true, name: true, waId: true } } },
@@ -330,6 +436,8 @@ export async function contextoDeConversacion(
       waId: conv?.contact.waId ?? null,
     },
     conversacion: { id: conversationId },
+    disparador,
     nodos: {},
+    vars: {},
   };
 }

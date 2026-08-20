@@ -40,31 +40,46 @@ export function leerTrigger(raw: unknown): Trigger {
   };
 }
 
+export interface Disparo {
+  dispara: boolean;
+  /** La palabra que hizo match, para `message.keyword`. `null` en el resto. */
+  palabra: string | null;
+}
+
+const NO: Disparo = { dispara: false, palabra: null };
+
 /**
- * ¿Este mensaje entrante dispara este trigger?
+ * ¿Este mensaje entrante dispara este trigger, y con qué palabra?
+ *
+ * Devuelve la palabra y no solo un booleano porque `normal()` —la normalización de acentos
+ * y mayúsculas— es privada de este módulo: si el dato se tira aquí, un nodo posterior que
+ * quiera saber cuál coincidió tiene que reimplementar el match, y dos implementaciones del
+ * mismo match acaban discrepando. Va al contexto como `disparador.palabra`.
  *
  * Los grupos quedan fuera SIEMPRE, sea cual sea el trigger: una automatización que
  * contesta sola en un grupo de veinte personas es la peor cara posible del producto.
  */
-export function disparaConEntrante(raw: unknown, evento: EventoEntrante): boolean {
-  if (evento.esGrupo) return false;
+export function evaluarEntrante(raw: unknown, evento: EventoEntrante): Disparo {
+  if (evento.esGrupo) return NO;
   const trigger = leerTrigger(raw);
   switch (trigger.type) {
     case 'message.inbound':
-    case 'webhook.received':
-      return true;
+      return { dispara: true, palabra: null };
     case 'message.keyword': {
       const palabras = Array.isArray(trigger.config?.palabras)
         ? (trigger.config!.palabras as unknown[]).filter((p): p is string => typeof p === 'string')
         : [];
-      if (!palabras.length) return false;
+      if (!palabras.length) return NO;
       const texto = normal(evento.texto);
       // `includes` y no igualdad: la gente escribe «hola, quiero info», no «info».
-      return palabras.some((p) => p.trim() !== '' && texto.includes(normal(p)));
+      const cual = palabras.find((p) => p.trim() !== '' && texto.includes(normal(p)));
+      return cual === undefined ? NO : { dispara: true, palabra: cual };
     }
     default:
-      // `schedule.cron` y `manual` no los dispara un mensaje.
-      return false;
+      // `schedule.cron` y `manual` no los dispara un mensaje. `webhook.received` TAMPOCO
+      // desde aquí: tiene su propia URL pública (`hooks.controller.ts`) y ya no es —como
+      // era— un duplicado de `message.inbound` que además no traía el evento.
+      return NO;
   }
 }
 

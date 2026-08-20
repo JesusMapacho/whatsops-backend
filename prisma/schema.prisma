@@ -168,6 +168,7 @@ model Tenant {
   automationEdges AutomationEdge[]
   automationRuns  AutomationRun[]
   automationSteps AutomationRunStep[]
+  variables       TenantVariable[]
 }
 
 // Método de pago de la suscripción a WhatsOps. NUNCA guarda el PAN: solo
@@ -955,6 +956,12 @@ model Automation {
   name     String
   status   AutomationStatus @default(draft)
   trigger  Json // { type: <key del catálogo>, config: {...} }
+  /// Token de la URL pública de esta automatización (`POST /hooks/<token>`). En CLARO y no
+  /// hasheado como `Invitation.tokenHash`: una invitación se usa una vez en días y rotarla
+  /// no rompe nada, pero esta URL la pega un integrador en un sistema externo y vive años,
+  /// así que «se me perdió» tiene que ser una lectura y no un incidente con un tercero. El
+  /// razonamiento completo, y por qué el hash no compra nada aquí, en `automations/hooks.ts`.
+  hookToken String?          @unique
   // Quién ejecuta. Los servicios que envuelven los nodos (`DealsService.create`,
   // `ConversationsService.assign`…) exigen un usuario: lo usan como dueño por defecto y
   // como autor del `Activity`. El motor no tiene sesión, así que actúa como el admin que
@@ -1081,6 +1088,25 @@ model AutomationRunStep {
   // de vuelta y el motor lo incrementa al reentrar.
   @@unique([runId, nodeId])
   @@index([runId])
+  @@index([tenantId])
+}
+
+/// Las constantes del negocio: precios, porcentajes, la URL de su API. Se leen desde
+/// cualquier nodo como `{{ajustes.<name>}}` y se editan en una pantalla, que es el punto:
+/// cambiar un precio en cinco automatizaciones distintas es cómo se queda una desactualizada.
+model TenantVariable {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  /// ponytail: el valor es texto y ya. El nodo de código hace `Number(...)` cuando toca.
+  /// Techo: si algún día hay que distinguir número de fecha en la UI, una columna `kind`.
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
   @@index([tenantId])
 }
 

@@ -1,6 +1,6 @@
 // Check del catálogo de nodos (v3 feature 17). Correr: npx ts-node src/automations/catalog.check.ts
 import * as assert from 'node:assert';
-import { NODE_TYPES, catalogoPublico, nodeType, validarConfig, validarTrigger } from './catalog';
+import { GUARDAR_COMO, NODE_TYPES, catalogoPublico, interpolarConfig, modoRutas, nodeType, schemaDe, validarConfig, validarTrigger } from './catalog';
 import { TRIGGERS } from './triggers';
 
 // --- forma del catálogo ---
@@ -66,5 +66,78 @@ assert.deepStrictEqual(validarTrigger({ type: 'message.keyword', config: { palab
 assert.throws(() => validarTrigger({ type: 'nope' }), /Disparador desconocido/);
 assert.throws(() => validarTrigger({ type: 'message.keyword', config: {} }), /falta/i);
 assert.deepStrictEqual(validarTrigger({ type: 'manual' }), { type: 'manual', config: {} });
+
+// --- schemaDe: «Guardar el resultado como» donde hay algo que nombrar ---
+for (const t of NODE_TYPES) {
+  const tiene = 'guardarComo' in schemaDe(t);
+  const deberia = t.category !== 'logica' && !t.sinSalida;
+  assert.strictEqual(tiene, deberia, `${t.key}: guardarComo donde hay salida que nombrar`);
+}
+// Los triggers SÍ lo llevan: su salida es la carga del disparo (`contexto.disparador`).
+assert.ok('guardarComo' in schemaDe(nodeType('message.keyword')!), 'un disparador puede nombrar su carga');
+// La lógica solo produce la rama, y `wait.reply` escribe su paso antes de esperar.
+assert.strictEqual(schemaDe(nodeType('logic.condition')!), nodeType('logic.condition')!.configSchema);
+assert.ok(!('guardarComo' in schemaDe(nodeType('wait.reply')!)), 'wait.reply guardaría siempre null');
+// `var.set` declara el suyo y gana: ahí el nombre es obligatorio y se llama distinto.
+assert.strictEqual(schemaDe(nodeType('var.set')!).guardarComo.requerido, true);
+assert.strictEqual(schemaDe(nodeType('var.set')!).guardarComo.label, 'Nombre de la variable');
+// Y el editor lo recibe, que es lo que hace que el panel lo pinte sin saber que existe.
+assert.ok('guardarComo' in catalogoPublico().find((t) => t.key === 'http.request')!.configSchema);
+
+// --- el nombre de la variable se valida al guardar ---
+assert.deepStrictEqual(validarConfig('http.request', { url: 'https://x.mx', guardarComo: 'cotiza' }), {
+  url: 'https://x.mx',
+  guardarComo: 'cotiza',
+});
+// Un nombre con punto o con espacio se guardaría igual y luego NO resolvería, en silencio.
+assert.throws(() => validarConfig('http.request', { url: 'https://x.mx', guardarComo: 'a.b' }), /nombre de variable/i);
+assert.throws(() => validarConfig('http.request', { url: 'https://x.mx', guardarComo: 'mi total' }), /nombre de variable/i);
+assert.deepStrictEqual(validarConfig('http.request', { url: 'https://x.mx' }), { url: 'https://x.mx' }, 'es opcional');
+assert.throws(() => validarConfig('var.set', { valor: '12' }), /falta/i, 'en var.set es obligatorio');
+
+// El código es un campo de texto más de cara a la validación.
+assert.deepStrictEqual(validarConfig('code.run', { codigo: 'return 1' }), { codigo: 'return 1' });
+assert.throws(() => validarConfig('code.run', {}), /falta/i);
+
+// --- interpolarConfig: TODA cadena, con dos excepciones declaradas ---
+const CTX = { vars: { total: '1840' }, ajustes: { minimo: '500' }, nodos: {} };
+const conf = (key: string, c: Record<string, unknown>) => interpolarConfig(nodeType(key)!, c, CTX);
+
+// El caso que motivó el cambio: el `valor` de «Si… entonces» NO se interpolaba, así que
+// comparaba contra el literal «{{ajustes.minimo}}» y se iba SIEMPRE por la rama falsa.
+assert.deepStrictEqual(
+  conf('logic.condition', { campo: 'vars.total', operador: 'gt', valor: '{{ajustes.minimo}}' }),
+  { campo: 'vars.total', operador: 'gt', valor: '500' },
+);
+assert.strictEqual((conf('message.send', { texto: 'Son {{vars.total}}' }) as any).texto, 'Son 1840');
+// Dentro de un `json` también: si no, los `casos` de «Según el valor» serían el último hueco.
+assert.deepStrictEqual(
+  (conf('logic.switch', { campo: 'x', casos: [{ rama: 'vip', operador: 'eq', valor: '{{vars.total}}' }] }) as any).casos,
+  [{ rama: 'vip', operador: 'eq', valor: '1840' }],
+);
+// Lo que NO se toca.
+assert.strictEqual((conf('wait.delay', { minutos: 15 }) as any).minutos, 15, 'un number se queda igual');
+assert.strictEqual(
+  (conf('code.run', { codigo: 'return "{{vars.total}}"' }) as any).codigo,
+  'return "{{vars.total}}"',
+  'el código NO se interpola: si no, el texto de un cliente entraría dentro del programa',
+);
+assert.strictEqual(
+  (conf('var.set', { guardarComo: 'total', valor: '{{vars.total}}' }) as any).guardarComo,
+  'total',
+  'guardarComo es un nombre, no una plantilla',
+);
+
+// --- modoRutas: qué sintaxis sugiere el editor en cada campo ---
+assert.strictEqual(modoRutas(nodeType('message.send')!.configSchema.texto), 'llaves');
+assert.strictEqual(modoRutas(nodeType('code.run')!.configSchema.codigo), 'ctx');
+// El «Campo» de los nodos de lógica es una ruta CRUDA: sugerir `{{}}` ahí enseñaría a
+// escribir algo que `valorDe` no resuelve.
+for (const k of ['logic.condition', 'logic.switch', 'logic.filter']) {
+  assert.strictEqual(modoRutas(nodeType(k)!.configSchema.campo), 'ruta', k);
+}
+assert.strictEqual(modoRutas(GUARDAR_COMO), null, 'en un nombre no se sugieren rutas');
+assert.strictEqual(modoRutas(nodeType('wait.delay')!.configSchema.minutos), null, 'un number no lleva rutas');
+assert.strictEqual(modoRutas(nodeType('logic.condition')!.configSchema.operador), null, 'un desplegable tampoco');
 
 console.log('catalog.check OK');

@@ -40,6 +40,9 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`WhatsOps backend escuchando en http://localhost:${port}`);
   console.log(`  CORS: ${corsOrigins().join(', ')}`);
+  // Donde el que despliega ya está mirando: si esta base no es la pública de verdad, las URL
+  // de los hooks que copien los operadores apuntarán a un sitio al que nadie llega.
+  console.log(`  URL de los hooks: ${process.env.API_PUBLIC_URL ?? `http://localhost:${port}`}/hooks/<token>`);
   console.log(
     process.env.COOKIE_SECURE === 'false'
       ? '  Cookie de sesión: Secure APAGADO (desarrollo sobre http)'

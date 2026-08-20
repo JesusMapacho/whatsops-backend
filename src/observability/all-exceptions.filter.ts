@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { redact } from './redact';
+import { esRutaDeHook, redact, redactPath } from './redact';
 
 // Filtro global: ante CUALQUIER excepción persiste un ErrorLog (mejor esfuerzo,
 // sin bloquear) y responde al cliente como lo haría Nest. Si el log falla, la
@@ -50,9 +50,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
         tenantId: req?.user?.tenantId ?? null,
         userId: req?.user?.userId ?? null,
         method: req?.method ?? 'UNKNOWN',
-        path: (req?.originalUrl ?? req?.url ?? '').split('?')[0] || '/',
+        path: redactPath((req?.originalUrl ?? req?.url ?? '').split('?')[0] || '/'),
         statusCode: status,
-        requestBody: sanitizeJson(redact(req?.body)),
+        // El cuerpo de un hook es PII de terceros que manda un sistema ajeno: mismo criterio
+        // que el CSV de un envío masivo (ver `redact.ts`), no acaba en un log de plataforma.
+        requestBody: esRutaDeHook((req?.originalUrl ?? req?.url ?? '').split('?')[0] || '/')
+          ? null
+          : sanitizeJson(redact(req?.body)),
         query: sanitizeJson(redact(req?.query)),
         errorMessage: String(message).slice(0, 2000),
         errorCode: err?.code ? String(err.code) : null,

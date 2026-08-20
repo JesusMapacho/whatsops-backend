@@ -1,6 +1,6 @@
 // Check de redacción. Correr: npx ts-node src/observability/redact.check.ts
 import * as assert from 'node:assert';
-import { redact } from './redact';
+import { esRutaDeHook, redact, redactPath } from './redact';
 
 const input = {
   email: 'a@b.com',
@@ -42,5 +42,28 @@ assert.strictEqual(envio.csv, '[REDACTED]');
 assert.strictEqual(envio.confirmCount, 2);
 assert.strictEqual((redact({ recipients: ['5218715172350'] }) as any).recipients, '[REDACTED]');
 assert.strictEqual((redact({ phones: ['5218715172350'] }) as any).phones, '[REDACTED]');
+
+// --- el token del hook va en la RUTA ---
+// Esto es la prueba escrita de que un 404 sobre /hooks/<token> no deja el token en
+// `ErrorLog.path`. Sin sesión, esa fila lleva `tenantId` nulo y la lee el super-admin
+// cross-tenant: con el token, cualquiera dispara la automatización de un cliente.
+const tok = 'aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0iL';
+assert.strictEqual(redactPath(`/hooks/${tok}`), '/hooks/[REDACTED]');
+assert.ok(!redactPath(`/hooks/${tok}`).includes(tok), 'ni un trozo del token sobrevive');
+assert.ok(esRutaDeHook(`/hooks/${tok}`));
+
+// Y no toca ninguna otra ruta: si tapara de más, los logs dejarían de servir para depurar.
+for (const otra of [
+  '/automations/cmg7x2k9a0001/hook/regenerate',
+  '/webhook/waha',
+  '/webhook',
+  '/hooks',        // sin token no hay nada que tapar
+  '/hooks/',
+  '/automations',
+  '/',
+]) {
+  assert.strictEqual(redactPath(otra), otra, otra);
+  assert.ok(!esRutaDeHook(otra), otra);
+}
 
 console.log('redact.check OK');

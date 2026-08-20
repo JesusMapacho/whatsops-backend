@@ -15,9 +15,10 @@ import { MessagingService } from '../messaging/messaging.service';
 import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
-import { Contexto, conSalida } from './contexto';
-import { Salida, Servicios, nodeType } from './catalog';
+import { Contexto, conSalida, conVariable } from './contexto';
+import { Salida, Servicios, interpolarConfig, nodeType } from './catalog';
 import { nodoRaiz, siguienteNodoId } from './graph';
+import { patronCron } from './triggers';
 import { AUTOMATION_QUEUE } from './automations.queue';
 import { contextoDeConversacion, crearRun } from './automations.service';
 
@@ -51,7 +52,7 @@ export class AutomationsProcessor extends WorkerHost {
   private async dispararCron(automationId: string) {
     const a = await this.prisma.automation.findUnique({
       where: { id: automationId },
-      select: { id: true, tenantId: true, status: true },
+      select: { id: true, tenantId: true, status: true, trigger: true },
     });
     // Pudo borrarse o apagarse entre dos ticks: no hacer nada es la respuesta correcta.
     if (!a || a.status !== 'active') return;
@@ -59,7 +60,10 @@ export class AutomationsProcessor extends WorkerHost {
       tenantId: a.tenantId,
       automationId: a.id,
       conversationId: null,
-      contexto: await contextoDeConversacion(this.prisma, a.tenantId, null),
+      contexto: await contextoDeConversacion(this.prisma, a.tenantId, null, {
+        tipo: 'schedule.cron',
+        patron: patronCron(a.trigger),
+      }),
     });
     if (run) await this.cola.add('run', { runId: run.id });
   }
@@ -81,10 +85,14 @@ export class AutomationsProcessor extends WorkerHost {
     const contextoPrevio = run.context as Contexto;
     const tipo = nodeType(nodo.type);
 
-    // Los triggers no se ejecutan: son la condición de nacimiento del run, no un paso.
+    // Los triggers no se ejecutan: son la condición de nacimiento del run, no un paso. Pero
+    // SÍ tienen salida —la carga que trajo el disparo, ya en el contexto—, y por eso pasan
+    // por `conSalidaYVariable` como cualquier acción: un «Guardar el resultado como» en el
+    // nodo de inicio no es un caso especial en ninguna parte del motor.
     if (!tipo?.handler) {
-      await this.registrarPaso(run, nodo.id, 'skipped', null, null, null);
-      return this.continuar(run, edges, nodo.id, null, contextoPrevio);
+      const carga = (contextoPrevio.disparador ?? null) as unknown;
+      await this.registrarPaso(run, nodo.id, 'skipped', null, carga, null);
+      return this.continuar(run, edges, nodo.id, null, this.conSalidaYVariable(contextoPrevio, nodo, carga));
     }
 
     // IDEMPOTENCIA: si este nodo ya salió bien, el job es un reintento de algo posterior.
@@ -99,16 +107,24 @@ export class AutomationsProcessor extends WorkerHost {
       // reencaminara por la salida por defecto, un reintento podría irse por la rama
       // equivocada, que en este motor significa mandarle otra cosa a un cliente.
       const rama = (previo.output as { rama?: string | null } | null)?.rama ?? null;
-      return this.continuar(run, edges, nodo.id, rama, conSalida(contextoPrevio, nodo.id, previo.output ?? null));
+      return this.continuar(run, edges, nodo.id, rama, this.conSalidaYVariable(contextoPrevio, nodo, previo.output ?? null));
     }
 
     let salida: Salida;
     try {
-      salida = await tipo.handler(nodo.config, {
+      // La config llega al handler con las `{{...}}` YA resueltas. En un solo sitio y no en
+      // cada handler: cuando era decisión de cada uno, once campos se la saltaban en
+      // silencio (el `valor` de «Si… entonces», entre ellos).
+      const contextoNodo = { ...contextoPrevio, ajustes: await this.ajustes(run.tenantId) };
+      salida = await tipo.handler(interpolarConfig(tipo, nodo.config, contextoNodo), {
         tenantId: run.tenantId,
         actorUserId: run.automation.actorUserId,
         conversationId: run.conversationId,
-        contexto: contextoPrevio,
+        // Los ajustes se mezclan arriba y NO se persisten en `AutomationRun.context`: se
+        // leen frescos en cada paso, así cambiar un precio en la pantalla alcanza también a
+        // los runs que ya están a mitad de camino. Y es un solo sitio, en vez de los tres
+        // que crean runs (crearRun, dispararCron y el entrante).
+        contexto: contextoNodo,
         servicios: this.servicios(),
       });
     } catch (e) {
@@ -124,7 +140,7 @@ export class AutomationsProcessor extends WorkerHost {
     }
 
     await this.registrarPaso(run, nodo.id, 'ok', nodo.config, salida.output ?? null, null);
-    const contexto = conSalida(contextoPrevio, nodo.id, salida.output ?? null);
+    const contexto = this.conSalidaYVariable(contextoPrevio, nodo, salida.output ?? null);
 
     // Espera por respuesta: el run se para y lo reanuda el próximo entrante de esa
     // conversación (`trigger-on-inbound.ts`).
@@ -209,6 +225,27 @@ export class AutomationsProcessor extends WorkerHost {
       create: { tenantId: run.tenantId, runId: run.id, nodeId, ...datos },
       update: datos,
     });
+  }
+
+  /**
+   * Guarda la salida del nodo en el contexto: siempre bajo `nodos.<id>`, y además bajo
+   * `vars.<nombre>` si el operador le puso uno. Lo usan los DOS caminos —el normal y el
+   * idempotente— a propósito: si el reintento no repusiera la variable, los nodos siguientes
+   * la encontrarían vacía y seguirían adelante sin decir nada.
+   */
+  private conSalidaYVariable(ctx: Contexto, nodo: { id: string; config: unknown }, output: unknown): Contexto {
+    const conNodo = conSalida(ctx, nodo.id, output);
+    const nombre = (nodo.config as Record<string, unknown> | null)?.guardarComo;
+    return typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
+  }
+
+  /** Las constantes del negocio, como `{{ajustes.precio_kg}}`. */
+  private async ajustes(tenantId: string): Promise<Record<string, string>> {
+    const filas = await this.prisma.tenantVariable.findMany({
+      where: { tenantId },
+      select: { name: true, value: true },
+    });
+    return Object.fromEntries(filas.map((f) => [f.name, f.value]));
   }
 
   private servicios(): Servicios {

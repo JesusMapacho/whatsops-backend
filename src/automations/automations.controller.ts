@@ -19,6 +19,29 @@ export class AutomationsController {
     return this.automations.catalogo();
   }
 
+  // Las constantes del negocio (`{{ajustes.<name>}}`). Un PUT que reemplaza el juego
+  // entero, igual que `PUT /automations/:id/graph`: es una pantalla con un botón de
+  // guardar, no un CRUD fila a fila.
+  @Get('automation-variables')
+  @RequirePermissions('automations:manage')
+  variables(@CurrentUser() user: AuthUser) {
+    return this.automations.variables(user.tenantId);
+  }
+
+  @Put('automation-variables')
+  @RequirePermissions('automations:manage')
+  guardarVariables(@CurrentUser() user: AuthUser, @Body() body: unknown) {
+    return this.automations.guardarVariables(user.tenantId, body);
+  }
+
+  // Rota la URL pública del disparador de webhook. Rompe la integración que use la vieja,
+  // pero NO apaga la automatización: rotar una credencial no cambia lo que hace.
+  @Post('automations/:id/hook/regenerate')
+  @RequirePermissions('automations:manage')
+  regenerarHook(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.automations.regenerarHook(user.tenantId, id);
+  }
+
   @Get('automations')
   @RequirePermissions('automations:manage')
   list(@CurrentUser() user: AuthUser) {

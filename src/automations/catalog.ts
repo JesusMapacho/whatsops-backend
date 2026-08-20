@@ -9,13 +9,14 @@
 // que la ventana de 24 h, los topes anti-baneo, el alcance por rol y las reglas del CRM
 // valgan igual desde una automatización que desde la pantalla.
 import { BadRequestException } from '@nestjs/common';
-import { Contexto, interpolar, valorDe } from './contexto';
+import { Contexto, NOMBRE_VAR, interpolar, valorDe } from './contexto';
+import { TOPE_MS, ejecutarCodigo } from './codigo';
 import { ramaDeCondicion, ramaDeSwitch } from './comparadores';
 import { TRIGGERS } from './triggers';
 
 // --- Contrato ----------------------------------------------------------------------
 
-export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion';
+export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion' | 'codigo';
 
 export interface Campo {
   tipo: TipoCampo;
@@ -23,6 +24,35 @@ export interface Campo {
   requerido?: boolean;
   opciones?: string[]; // solo para `opcion`
   ayuda?: string;
+  /**
+   * No sustituir `{{...}}` en este campo. La excepción, no la regla: todo lo demás se
+   * interpola en un solo sitio (`interpolarConfig`), porque cuando era decisión de cada
+   * handler la mitad de los campos se la saltaba y la pantalla no lo decía.
+   */
+  sinInterpolar?: boolean;
+  /**
+   * Con qué sintaxis se escribe una variable AQUÍ, para que el editor sugiera la correcta.
+   * Solo hay que ponerlo en las excepciones; `modoRutas()` deriva el resto.
+   */
+  rutas?: ModoRutas;
+}
+
+/**
+ * Las tres formas de nombrar una ruta del contexto, según el campo:
+ * `llaves` → «Hola {{contacto.nombre}}» · `ctx` → `ctx.vars.total` dentro del código ·
+ * `ruta` → el campo ES la ruta, sin adornos (el «Campo» de los nodos de lógica).
+ */
+export type ModoRutas = 'llaves' | 'ctx' | 'ruta';
+
+/**
+ * Qué sugerir en un campo. Se deriva en vez de anotarse en los doce campos de texto: la
+ * regla es «todo campo de texto admite {{...}}», y las excepciones son las que se declaran.
+ */
+export function modoRutas(campo: Campo): ModoRutas | null {
+  if (campo.rutas) return campo.rutas;
+  if (campo.tipo === 'codigo') return 'ctx';
+  if (campo.sinInterpolar) return null; // `guardarComo`: es un nombre, no una plantilla
+  return campo.tipo === 'string' || campo.tipo === 'texto' ? 'llaves' : null;
 }
 
 export type ConfigSchema = Record<string, Campo>;
@@ -75,6 +105,8 @@ export interface NodeType {
   descripcion: string;
   configSchema: ConfigSchema;
   handler?: (config: any, ej: Ejecucion) => Promise<Salida>;
+  /** No ofrecer «Guardar el resultado como»: este nodo no produce nada que nombrar. */
+  sinSalida?: boolean;
 }
 
 // --- Ayudas compartidas ------------------------------------------------------------
@@ -100,8 +132,11 @@ function conversacion(ej: Ejecucion): string {
   return ej.conversationId;
 }
 
-function texto(config: any, campo: string, ej: Ejecucion): string {
-  return interpolar(String(config?.[campo] ?? ''), ej.contexto);
+// Ya NO interpola: el motor le entrega al handler la config con las `{{...}}` resueltas
+// (`interpolarConfig`, abajo). Si esto volviera a llamar a `interpolar`, esos campos se
+// sustituirían dos veces.
+function texto(config: any, campo: string, _ej: Ejecucion): string {
+  return String(config?.[campo] ?? '');
 }
 
 // --- El catálogo -------------------------------------------------------------------
@@ -126,10 +161,19 @@ export const NODE_TYPES: NodeType[] = [
   },
   {
     key: 'webhook.received',
-    label: 'Llega un evento del webhook',
+    label: 'Llega una llamada externa',
     category: 'trigger',
-    descripcion: 'Cualquier evento entrante del canal, con o sin texto.',
-    configSchema: {},
+    descripcion:
+      'Un sistema de fuera hace POST a una URL propia de esta automatización. El cuerpo del JSON queda en {{disparador.cuerpo...}}.',
+    configSchema: {
+      telefono: {
+        tipo: 'string',
+        label: 'Teléfono del contacto (opcional)',
+        ayuda:
+          'Admite {{disparador.cuerpo.telefono}}. Si ese contacto ya tiene una conversación abierta, el run la usa y ' +
+          '«Enviar mensaje» funciona. NO crea contactos ni conversaciones: para escribir primero está la cartera de clientes.',
+      },
+    },
   },
   {
     key: 'schedule.cron',
@@ -343,12 +387,60 @@ export const NODE_TYPES: NodeType[] = [
     },
   },
   {
+    key: 'var.set',
+    label: 'Guardar una variable',
+    category: 'accion',
+    descripcion: 'Guarda un valor con nombre para reusarlo más adelante como {{vars.<nombre>}}.',
+    configSchema: {
+      // Declara `guardarComo` él mismo, y por eso `schemaDe` no se lo inyecta: aquí el
+      // nombre es el punto del nodo, así que va obligatorio y con otra etiqueta. El
+      // mecanismo que lo guarda es el mismo de todas las acciones — cero casos especiales
+      // en el motor.
+      guardarComo: { tipo: 'string', label: 'Nombre de la variable', requerido: true, sinInterpolar: true },
+      valor: { tipo: 'texto', label: 'Valor', ayuda: 'Admite {{...}}' },
+    },
+    handler: async (config, ej) => ({ output: texto(config, 'valor', ej) }),
+  },
+  {
+    key: 'code.run',
+    label: 'Calcular con código',
+    category: 'accion',
+    descripcion: 'JavaScript que recibe `ctx` y devuelve un valor: totales, porcentajes, tarifas por tramo.',
+    configSchema: {
+      codigo: {
+        tipo: 'codigo',
+        label: 'Código',
+        requerido: true,
+        // Si se interpolara, el texto que escribe un cliente entraría DENTRO del programa y
+        // podría cerrar una comilla y seguir programando. Aquí se leen ctx.vars.x directamente.
+        sinInterpolar: true,
+        ayuda: 'Recibes `ctx` (mensaje, contacto, vars, ajustes, nodos) y devuelves con `return`.',
+      },
+    },
+    handler: async (config, ej) => {
+      // El código NO se interpola con {{...}}, a diferencia del resto de campos de texto.
+      // Si se hiciera, el texto que escribe un cliente entraría dentro del programa y podría
+      // cerrar una comilla y seguir programando. Se leen `ctx.vars.x` y `ctx.ajustes.y`.
+      const codigo = String(config?.codigo ?? '');
+      return { output: await ejecutarCodigo(codigo, ej.contexto, TOPE_MS) };
+    },
+  },
+  {
     key: 'http.request',
     label: 'Llamar a una API',
     category: 'accion',
-    descripcion: 'GET o POST a una URL externa. La respuesta queda en el contexto del run.',
+    descripcion: 'GET o POST a una URL externa. Nómbrala en «Guardar el resultado como» y la respuesta se lee con {{vars.<nombre>.json...}}.',
     configSchema: {
-      url: { tipo: 'string', label: 'URL', requerido: true },
+      url: {
+        tipo: 'string',
+        label: 'URL',
+        requerido: true,
+        // Techo conocido: no hay defensa contra SSRF. Una variable en el HOST manda el fetch
+        // del worker a donde diga el dato — y con el disparador de llamada externa ese dato
+        // lo elige un tercero. Media defensa (un regex contra 169.254.) sería peor que
+        // ninguna: da confianza y se salta con un DNS que resuelve a una IP privada.
+        ayuda: 'No pongas variables en el dominio: solo en la ruta o los parámetros.',
+      },
       metodo: { tipo: 'opcion', label: 'Método', opciones: ['GET', 'POST'] },
       cuerpo: { tipo: 'texto', label: 'Cuerpo (JSON)', ayuda: 'Admite {{...}}' },
     },
@@ -403,8 +495,12 @@ export const NODE_TYPES: NodeType[] = [
     key: 'wait.reply',
     label: 'Esperar respuesta',
     category: 'accion',
-    descripcion: 'Deja el run en espera hasta que el contacto conteste.',
+    descripcion: 'Deja el run en espera hasta que el contacto conteste. Su respuesta llega en {{mensaje.texto}}.',
     configSchema: {},
+    // Su paso se registra ANTES de esperar, así que un «Guardar el resultado como» aquí
+    // guardaría siempre null. La respuesta del cliente llega, como siempre, en
+    // `{{mensaje.texto}}` (lo repone `trigger-on-inbound.ts` al reanudar).
+    sinSalida: true,
     handler: async () => ({ esperar: { entrada: true } }),
   },
 
@@ -415,7 +511,7 @@ export const NODE_TYPES: NodeType[] = [
     category: 'logica',
     descripcion: 'Compara un campo del contexto y sigue por la rama verdadera o falsa.',
     configSchema: {
-      campo: { tipo: 'string', label: 'Campo', requerido: true, ayuda: 'P. ej. mensaje.texto' },
+      campo: { tipo: 'string', label: 'Campo', requerido: true, rutas: 'ruta', ayuda: 'P. ej. mensaje.texto' },
       operador: { tipo: 'opcion', label: 'Operador', requerido: true, opciones: ['eq', 'neq', 'contains', 'gt', 'lt', 'matches'] },
       valor: { tipo: 'string', label: 'Valor' },
     },
@@ -430,7 +526,7 @@ export const NODE_TYPES: NodeType[] = [
     category: 'logica',
     descripcion: 'Varias ramas por el mismo campo. Si ninguna coincide, sigue por la salida por defecto.',
     configSchema: {
-      campo: { tipo: 'string', label: 'Campo', requerido: true },
+      campo: { tipo: 'string', label: 'Campo', requerido: true, rutas: 'ruta' },
       casos: { tipo: 'json', label: 'Casos', requerido: true, ayuda: '[{"rama":"vip","operador":"eq","valor":"si"}]' },
     },
     handler: async (config, ej) => {
@@ -444,7 +540,7 @@ export const NODE_TYPES: NodeType[] = [
     category: 'logica',
     descripcion: 'Corta el run cuando la condición no se cumple. Es el «solo si» sin dibujar dos ramas.',
     configSchema: {
-      campo: { tipo: 'string', label: 'Campo', requerido: true },
+      campo: { tipo: 'string', label: 'Campo', requerido: true, rutas: 'ruta' },
       operador: { tipo: 'opcion', label: 'Operador', requerido: true, opciones: ['eq', 'neq', 'contains', 'gt', 'lt', 'matches'] },
       valor: { tipo: 'string', label: 'Valor' },
     },
@@ -457,15 +553,77 @@ export const NODE_TYPES: NodeType[] = [
   },
 ];
 
+// --- Nombrar la salida de un nodo --------------------------------------------------
+
+export const GUARDAR_COMO: Campo = {
+  tipo: 'string',
+  // Es un nombre, no una plantilla (y `NOMBRE_VAR` ya prohíbe las llaves).
+  sinInterpolar: true,
+  label: 'Guardar el resultado como',
+  ayuda: 'Un nombre corto; luego se lee como {{vars.<nombre>}} en cualquier nodo posterior.',
+};
+
+/**
+ * El schema que se ENSEÑA y se VALIDA, que no es el que declara el nodo: a toda acción se le
+ * añade «Guardar el resultado como».
+ *
+ * Existe porque `nodos.<id>` no sirve de cara al usuario. El id es un cuid, y además CAMBIA
+ * en cada guardado del grafo (`guardarGrafo` borra y recrea las filas), así que un
+ * `{{nodos.cmg7x2k9a0001.json.precio}}` escrito a mano deja de resolver al siguiente
+ * guardado — y en silencio, porque una variable ausente se sustituye por vacío. La única
+ * referencia estable a la salida de un nodo es el nombre que le ponga el operador.
+ *
+ * Se inyecta aquí, en un solo sitio, para que un tipo nuevo lo herede sin acordarse.
+ */
+export function schemaDe(tipo: NodeType): ConfigSchema {
+  // Los de lógica solo producen la rama por la que sigue el run: no hay nada que nombrar.
+  // Los triggers SÍ: su salida es la carga del disparo (`contexto.disparador`) — el texto que
+  // arrancó el flujo, la palabra que coincidió o el cuerpo de la llamada externa.
+  if (tipo.category === 'logica' || tipo.sinSalida) return tipo.configSchema;
+  // Salvo que el nodo lo declare él mismo, para hacerlo obligatorio o renombrarlo (`var.set`).
+  if (tipo.configSchema.guardarComo) return tipo.configSchema;
+  return { ...tipo.configSchema, guardarComo: GUARDAR_COMO };
+}
+
+/**
+ * Sustituye `{{...}}` en TODAS las cadenas de la config, incluidas las que van dentro de un
+ * campo `json` (los `casos` de «Según el valor», si no, serían el último hueco). El motor la
+ * llama justo antes del handler.
+ *
+ * Existe porque interpolar era decisión de cada handler, y eso dejaba once campos fuera sin
+ * que la pantalla lo dijera — entre ellos el `valor` de «Si… entonces», que comparaba contra
+ * el literal «{{vars.x}}» y por tanto se iba SIEMPRE por la rama falsa, en silencio.
+ */
+export function interpolarConfig(tipo: NodeType, config: unknown, ctx: Contexto): Record<string, unknown> {
+  const src = (config ?? {}) as Record<string, unknown>;
+  const schema = schemaDe(tipo);
+  const hondo = (v: unknown): unknown => {
+    if (typeof v === 'string') return interpolar(v, ctx);
+    if (Array.isArray(v)) return v.map(hondo);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, hondo(x)]));
+    }
+    return v;
+  };
+  const out: Record<string, unknown> = {};
+  for (const [campo, valor] of Object.entries(src)) {
+    out[campo] = schema[campo]?.sinInterpolar ? valor : hondo(valor);
+  }
+  return out;
+}
+
 const POR_KEY = new Map(NODE_TYPES.map((t) => [t.key, t]));
 
 export function nodeType(key: string): NodeType | undefined {
   return POR_KEY.get(key);
 }
 
-/** El catálogo tal como lo consume el editor: sin `handler`, que no es serializable. */
+/**
+ * El catálogo tal como lo consume el editor: sin `handler` (que no es serializable) y con el
+ * `configSchema` efectivo, así el panel pinta «Guardar el resultado como» sin saber que existe.
+ */
 export function catalogoPublico() {
-  return NODE_TYPES.map(({ handler: _handler, ...resto }) => resto);
+  return NODE_TYPES.map(({ handler: _handler, ...resto }) => ({ ...resto, configSchema: schemaDe(resto as NodeType) }));
 }
 
 /**
@@ -479,7 +637,7 @@ export function validarConfig(key: string, config: unknown): Record<string, unkn
   const src = (config ?? {}) as Record<string, unknown>;
   const out: Record<string, unknown> = {};
 
-  for (const [campo, def] of Object.entries(tipo.configSchema)) {
+  for (const [campo, def] of Object.entries(schemaDe(tipo))) {
     const v = src[campo];
     const vacio = v === undefined || v === null || v === '';
     if (vacio) {
@@ -489,6 +647,7 @@ export function validarConfig(key: string, config: unknown): Record<string, unkn
     switch (def.tipo) {
       case 'string':
       case 'texto':
+      case 'codigo':
         if (typeof v !== 'string') throw new BadRequestException(`${tipo.label}: «${def.label}» tiene que ser texto`);
         out[campo] = v;
         break;
@@ -514,6 +673,15 @@ export function validarConfig(key: string, config: unknown): Record<string, unkn
         out[campo] = v as object;
         break;
     }
+  }
+
+  // El nombre tiene que ser alcanzable desde `{{vars.<nombre>}}`. Un «mi total» o un «a.b»
+  // se guardarían tan ricamente y luego no resolverían nunca, en silencio.
+  const nombre = out.guardarComo;
+  if (typeof nombre === 'string' && !NOMBRE_VAR.test(nombre)) {
+    throw new BadRequestException(
+      `${tipo.label}: «${nombre}» no vale como nombre de variable. Solo letras, números y guion bajo, empezando por letra.`,
+    );
   }
   return out;
 }

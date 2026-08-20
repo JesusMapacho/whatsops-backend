@@ -5,6 +5,8 @@ import { EventsModule } from '../events/events.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { CrmModule } from '../crm/crm.module';
 import { AutomationsController } from './automations.controller';
+import { AutomationsHooksController } from './automations-hooks.controller';
+import { AutomationsHooksService } from './automations-hooks.service';
 import { AutomationsService } from './automations.service';
 import { AutomationsProcessor } from './automations.processor';
 import { AUTOMATION_QUEUE } from './automations.queue';
@@ -31,8 +33,8 @@ import { AUTOMATION_QUEUE } from './automations.queue';
       },
     }),
   ],
-  controllers: [AutomationsController],
-  providers: [AutomationsService, AutomationsProcessor],
+  controllers: [AutomationsController, AutomationsHooksController],
+  providers: [AutomationsService, AutomationsHooksService, AutomationsProcessor],
   exports: [AutomationsService],
 })
 export class AutomationsModule implements OnModuleInit {

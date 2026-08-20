@@ -11,7 +11,7 @@ import { Logger } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { contextoDeMensaje } from './contexto';
-import { disparaConEntrante } from './triggers';
+import { evaluarEntrante } from './triggers';
 import { crearRun } from './automations.service';
 
 const logger = new Logger('AutomationTrigger');
@@ -59,9 +59,11 @@ export async function triggerOnInbound(
     });
     if (!activas.length) return;
 
-    const candidatas = activas.filter((a) =>
-      disparaConEntrante(a.trigger, { texto: entrante.texto, esGrupo: entrante.esGrupo }),
-    );
+    // Se guarda el resultado entero y no solo el sí/no: la palabra que coincidió va al
+    // contexto como `disparador.palabra`, y aquí es el único sitio donde se conoce.
+    const candidatas = activas
+      .map((a) => ({ a, disparo: evaluarEntrante(a.trigger, { texto: entrante.texto, esGrupo: entrante.esGrupo }) }))
+      .filter((c) => c.disparo.dispara);
     if (!candidatas.length) return;
 
     // Solo la PRIMERA que coincide. Un mensaje que dispara tres automatizaciones a la vez
@@ -71,11 +73,13 @@ export async function triggerOnInbound(
     const elegida = candidatas[0];
     const run = await crearRun(prisma, {
       tenantId: entrante.tenantId,
-      automationId: elegida.id,
+      automationId: elegida.a.id,
       conversationId: entrante.conversationId,
       contexto: contextoDeMensaje({
         texto: entrante.texto,
         wamid: entrante.wamid,
+        tipo: (elegida.a.trigger as { type?: string } | null)?.type,
+        palabra: elegida.disparo.palabra,
         contacto: { id: entrante.contacto.id, nombre: entrante.contacto.name, waId: entrante.contacto.waId },
         conversationId: entrante.conversationId,
       }),
