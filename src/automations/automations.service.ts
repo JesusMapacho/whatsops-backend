@@ -3,7 +3,7 @@
 // Guardar y activar son cosas distintas a propósito: `draft` acepta cualquier cosa (a medio
 // dibujar el grafo está roto por definición) y `active` exige que el grafo se pueda recorrer.
 // El interruptor es la frontera, no el editor.
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
@@ -22,6 +22,10 @@ const AUTOMATION_INCLUDE = {
 
 @Injectable()
 export class AutomationsService {
+  private readonly logger = new Logger(AutomationsService.name);
+  /** Cada cuánto barre. Def. 2 min, como la reconciliación de WAHA. 0 o negativo desactiva. */
+  private readonly barridoMs = Number(process.env.AUTOMATION_SWEEP_MS) || 2 * 60 * 1000;
+
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(AUTOMATION_QUEUE) private readonly cola: Queue,
@@ -320,6 +324,54 @@ export class AutomationsService {
   }
 
   /**
+   * TODAS las ejecuciones del negocio, con la automatización de cada una. Es la pregunta «¿qué
+   * disparó este mensaje?», que hasta ahora no se podía contestar: las ejecuciones solo se
+   * veían por automatización, así que con dos activas se miraba la lista vacía de una mientras
+   * los runs se acumulaban en la otra, y eso se vive como que la app se rompió sola.
+   *
+   * `select` de la automatización y NO `include: { automation: true }`: la fila entera lleva
+   * `hookToken`, y devolverla es exactamente lo que `sinToken()` existe para evitar.
+   */
+  async todosLosRuns(tenantId: string, limit = 30) {
+    return this.prisma.automationRun.findMany({
+      where: { tenantId },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(Math.max(Number(limit) || 30, 1), 100),
+      include: {
+        automation: { select: { id: true, name: true } },
+        steps: { orderBy: { createdAt: 'asc' } },
+      },
+    });
+  }
+
+  /**
+   * Cancelar a mano. Hasta ahora la única forma de desbloquear una conversación que se había
+   * quedado con un run colgado era borrar la automatización —con su cascada— o un UPDATE en la
+   * base. El barrido cubre lo automático; esto es para cuando alguien no quiere esperarlo.
+   */
+  async cancelarRun(tenantId: string, id: string) {
+    const run = await this.prisma.automationRun.findFirst({
+      where: { id, tenantId },
+      select: { id: true, status: true },
+    });
+    if (!run) throw new NotFoundException('Ejecución no encontrada');
+    if (run.status !== 'running' && run.status !== 'waiting') {
+      throw new BadRequestException('Esa ejecución ya había terminado.');
+    }
+    return this.prisma.automationRun.update({
+      where: { id: run.id },
+      data: {
+        status: 'cortado',
+        error: 'Cancelada a mano.',
+        currentNodeId: null,
+        waitingConversationId: null,
+        reanudarEn: null,
+        caducaEn: null,
+      },
+    });
+  }
+
+  /**
    * Disparo manual. Sirve para el trigger `manual` y para probar cualquier automatización
    * sin esperar a que escriba un cliente.
    */
@@ -372,6 +424,33 @@ export class AutomationsService {
     }
   }
 
+  // --- barrido --------------------------------------------------------------------------
+  //
+  // Job repetible de BullMQ y NO `setInterval`, por el mismo motivo que la reconciliación de
+  // WAHA lo dice en su comentario: `onModuleInit` corre en CADA réplica, así que con dos
+  // instancias del backend un `setInterval` doble-dispararía. Aquí eso no es cosmético: dos
+  // réplicas liberando el mismo run a la vez es una carrera sobre la unique. El scheduler vive
+  // en Redis y encola una sola vez por periodo.
+
+  async programarBarrido() {
+    if (this.barridoMs <= 0) return; // 0 o negativo desactiva, como la purga de WAHA
+    try {
+      await this.cola.add(
+        'sweep',
+        {},
+        {
+          repeat: { every: this.barridoMs },
+          jobId: 'automation-sweep-tick', // idempotente: reiniciar no acumula schedulers
+          // Un tick cada pocos minutos no debe llenar Redis de completados.
+          removeOnComplete: 10,
+        },
+      );
+    } catch (e) {
+      // Redis caído al arrancar no puede tumbar el boot del backend.
+      this.logger.warn(`No se pudo programar el barrido de runs: ${(e as Error).message}`);
+    }
+  }
+
   /** Al arrancar: reponer los repetibles de las cron activas (Redis puede haberse vaciado). */
   async reponerCrons() {
     const activas = await this.prisma.automation.findMany({
@@ -385,8 +464,11 @@ export class AutomationsService {
 // --- Funciones libres, compartidas con el worker del webhook -------------------------
 
 /**
- * Crea el run respetando «un run activo por conversación». Devuelve `null` si ya había uno:
- * lo decide la unique `(tenantId, activeConversationId)` de la base y no un `findFirst`, que
+ * Crea el run. Ya NO reserva la conversación: desde la feature 41 un run en curso no bloquea
+ * nada, así que dos flujos pueden convivir en la misma conversación. Lo único exclusivo es
+ * quién se queda con la próxima respuesta, y eso lo toma el motor al aparcarse.
+ *
+ * Devuelve `null` solo si choca con esa reserva —la unique de la base y no un `findFirst`, que
  * con dos mensajes llegando a la vez es una carrera que se pierde en producción.
  */
 export async function crearRun(
@@ -404,12 +486,17 @@ export async function crearRun(
         tenantId: datos.tenantId,
         automationId: datos.automationId,
         conversationId: datos.conversationId,
-        activeConversationId: datos.conversationId,
+        // `waitingConversationId` NO se pone aquí: un run que arranca no bloquea nada. El
+        // candado lo toma el motor al aparcarse en «Esperar respuesta», que es el único momento
+        // en que hay algo que reservar.
         context: datos.contexto as any,
       },
     });
   } catch (e: any) {
-    if (e?.code === 'P2002') return null;
+    // Se mira `meta.target` y no solo el código: la tabla tiene más de una unique, y tratar
+    // cualquier choque como «ya hay uno esperando» convierte un fallo distinto en un `null`
+    // silencioso que el llamante interpreta al revés.
+    if (e?.code === 'P2002' && String(e?.meta?.target ?? '').includes('waitingConversationId')) return null;
     throw e;
   }
 }

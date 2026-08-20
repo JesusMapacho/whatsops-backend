@@ -31,11 +31,20 @@ export async function triggerOnInbound(
   entrante: EntranteParaAutomatizar,
 ): Promise<void> {
   try {
-    // 1. ¿Hay un run esperando la respuesta de este cliente? Reanudarlo tiene prioridad
-    //    sobre crear otro: si no, contestar «sí» abriría una segunda conversación paralela
-    //    con la misma persona.
+    // 1. ¿Hay un run esperando la RESPUESTA de este cliente? Reanudarlo tiene prioridad sobre
+    //    crear otro: si no, contestar «sí» abriría una segunda conversación paralela con la
+    //    misma persona.
+    //
+    //    El `findFirst` sin `orderBy` es correcto SOLO porque la unique
+    //    `(tenantId, waitingConversationId)` garantiza que hay una fila como máximo. Si esa
+    //    unique se cayera, esto entregaría la respuesta a uno de los dos al azar y el otro se
+    //    quedaría dormido para siempre — es la razón entera de que el candado exista.
+    //
+    //    Y solo casan los que esperan respuesta: un run aparcado por TIEMPO tiene esta columna
+    //    a null, así que un mensaje llegado durante un «Esperar N minutos» ya no se cae por el
+    //    agujero de antes y dispara con normalidad.
     const esperando = await prisma.automationRun.findFirst({
-      where: { tenantId: entrante.tenantId, activeConversationId: entrante.conversationId, status: 'waiting' },
+      where: { tenantId: entrante.tenantId, waitingConversationId: entrante.conversationId, status: 'waiting' },
       select: { id: true, context: true },
     });
     if (esperando) {
@@ -77,8 +86,9 @@ export async function triggerOnInbound(
     if (!candidatas.length) return;
 
     // Solo la PRIMERA. Un mensaje que dispara tres automatizaciones a la vez son tres
-    // respuestas automáticas al mismo cliente, y además solo cabe un run activo por
-    // conversación (lo impone la unique de la base).
+    // respuestas automáticas al mismo cliente. (Lo de «solo cabe un run activo por
+    // conversación» ya no aplica: desde la feature 41 un run corriendo no reserva nada, y lo
+    // único exclusivo es quién se queda con la próxima respuesta.)
     const elegida = candidatas[0];
     const run = await crearRun(prisma, {
       tenantId: entrante.tenantId,
@@ -93,8 +103,16 @@ export async function triggerOnInbound(
         conversationId: entrante.conversationId,
       }),
     });
-    // `null` = ya había un run vivo en esa conversación. No es un error: es el freno.
+    // `null` = ya hay un run aparcado esperando la respuesta de esta persona, así que este
+    // mensaje es para él y no para arrancar otro. Se LOGUEA: el silencio de antes es la mitad
+    // de por qué «la automatización dejó de responder» era indiagnosticable.
     if (run) await cola.add('run', { runId: run.id });
+    else {
+      logger.log(
+        `El mensaje no disparó «${elegida.a.id}»: ya hay una ejecución esperando respuesta en ` +
+          `la conversación ${entrante.conversationId}.`,
+      );
+    }
   } catch (e) {
     logger.warn(`No se pudo disparar la automatización del entrante: ${(e as Error).message}`);
   }

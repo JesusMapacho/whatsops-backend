@@ -90,12 +90,37 @@ export interface Ejecucion {
   servicios: Servicios;
 }
 
+/**
+ * Techo de cualquier espera, en minutos (7 días). Vale para el «Esperar N minutos» y para la
+ * caducidad del «Esperar respuesta»: por encima de una semana, un run aparcado deja de ser una
+ * espera y es un olvido.
+ */
+export const TOPE_ESPERA_MIN = 7 * 24 * 60;
+
+/**
+ * La rama por la que sigue «Esperar respuesta» cuando el contacto no contesta a tiempo.
+ *
+ * El nombre está aquí y **copiado a mano en `canvas.ts` del frontend**, igual que la regex de
+ * `{{...}}`: `ramasDe()` decide cuántos puertos se dibujan y tiene que coincidir con lo que
+ * `siguienteNodoId` busca aquí. Si se cambia en un sitio y no en el otro, el operador cablea
+ * una arista a una rama que el motor no mira nunca — y no da error, simplemente no pasa nada.
+ */
+export const RAMA_SIN_RESPUESTA = 'sin-respuesta';
+
+/** Paciencia por defecto de «Esperar respuesta», en horas. El porqué del 24, en su `ayuda`. */
+export const CADUCIDAD_RESPUESTA_H = 24;
+
 export interface Salida {
   output?: unknown;
   /** Rama por la que seguir. `null` = la salida por defecto. */
   branch?: string | null;
-  /** Pedir al motor que espere: por tiempo (`ms`) o a que el cliente conteste (`entrada`). */
-  esperar?: { ms?: number; entrada?: boolean };
+  /**
+   * Pedir al motor que espere: por tiempo (`ms`) o a que el cliente conteste (`entrada`).
+   *
+   * Con `entrada`, `caducaMs` dice cuánta paciencia tener. No es opcional de hecho: sin
+   * caducidad, un cliente que no contesta nunca dejaba la conversación bloqueada para siempre.
+   */
+  esperar?: { ms?: number; entrada?: boolean; caducaMs?: number };
 }
 
 export interface NodeType {
@@ -487,7 +512,10 @@ export const NODE_TYPES: NodeType[] = [
       minutos: { tipo: 'number', label: 'Minutos', requerido: true },
     },
     handler: async (config) => {
-      const min = Math.max(1, Number(config?.minutos) || 1);
+      // Techo de 7 días: por encima, lo que se quiere es un disparador por hora («a una hora»),
+      // no un run aparcado un mes ocupando un job con `delay` en Redis. Sin techo, un
+      // «43200 minutos» escrito por error era justo eso.
+      const min = Math.min(Math.max(1, Number(config?.minutos) || 1), TOPE_ESPERA_MIN);
       return { esperar: { ms: min * 60_000 }, output: { minutos: min } };
     },
   },
@@ -495,13 +523,27 @@ export const NODE_TYPES: NodeType[] = [
     key: 'wait.reply',
     label: 'Esperar respuesta',
     category: 'accion',
-    descripcion: 'Deja el run en espera hasta que el contacto conteste. Su respuesta llega en {{mensaje.texto}}.',
-    configSchema: {},
+    descripcion:
+      'Deja el run en espera hasta que el contacto conteste. Su respuesta llega en ' +
+      '{{mensaje.texto}}. Si no contesta a tiempo, sigue por la rama «no contestó».',
+    configSchema: {
+      horas: {
+        tipo: 'number',
+        label: 'Horas de espera',
+        ayuda:
+          'Cuánto esperar antes de seguir por «no contestó». Por defecto 24, que es la ventana ' +
+          'de servicio de WhatsApp: pasada, en el transporte oficial a menudo ya no se puede ' +
+          'contestar, así que esperar más es esperar algo sobre lo que no se puede actuar.',
+      },
+    },
     // Su paso se registra ANTES de esperar, así que un «Guardar el resultado como» aquí
     // guardaría siempre null. La respuesta del cliente llega, como siempre, en
     // `{{mensaje.texto}}` (lo repone `trigger-on-inbound.ts` al reanudar).
     sinSalida: true,
-    handler: async () => ({ esperar: { entrada: true } }),
+    handler: async (config) => {
+      const horas = Math.min(Math.max(1, Number(config?.horas) || CADUCIDAD_RESPUESTA_H), TOPE_ESPERA_MIN / 60);
+      return { esperar: { entrada: true, caducaMs: horas * 3600_000 } };
+    },
   },
 
   // ---- Lógica ---------------------------------------------------------------------

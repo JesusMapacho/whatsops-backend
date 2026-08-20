@@ -44,5 +44,7 @@ export class AutomationsModule implements OnModuleInit {
   // compose down` deja las automatizaciones por hora activas en la base y muertas de hecho.
   async onModuleInit() {
     await this.automations.reponerCrons();
+    // El barrido va aquí por lo mismo: su scheduler vive en Redis y hay que reponerlo.
+    await this.automations.programarBarrido();
   }
 }

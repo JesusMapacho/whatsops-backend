@@ -97,6 +97,9 @@ enum AutomationRunStatus {
   waiting
   done
   failed
+  /// Acabo sin terminar y NO porque un nodo fallara: caduco la espera, lo cancelo una persona,
+  /// o el proceso murio y el barrido se rindio. El motivo concreto va en `error`.
+  cortado
 }
 
 enum StepStatus {
@@ -1046,19 +1049,37 @@ model AutomationRun {
   context       Json    @default("{}")
   currentNodeId String?
   error         String?
-  // Copia de `conversationId` que SOLO vale mientras el run está vivo, y se pone a null al
-  // terminar. Existe para que "un run activo por conversación" lo imponga la base con el
-  // unique de abajo: Prisma no da uniques parciales, y un `findFirst` antes de crear es
-  // una carrera con dos mensajes que llegan juntos — exactamente el caso real.
-  activeConversationId String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  // EL CANDADO DE LA PROXIMA RESPUESTA. Se pone al aparcarse en «Esperar respuesta» y se
+  // suelta al reanudar o al terminar; mientras un run corre NO lo tiene.
+  //
+  // Antes se llamaba `activeConversationId` y se tomaba al crear el run, o sea que un run
+  // ejecutandose bloqueaba la conversacion. Pero la unique de abajo existe por UNA razon: al
+  // contestar el cliente, `trigger-on-inbound.ts` busca el run aparcado con un `findFirst`
+  // sin `orderBy`, y con dos aparcados la respuesta iria a uno al azar. El recurso escaso no
+  // es la conversacion, es quien se queda con la proxima respuesta — y el nombre lo dice.
+  //
+  // Que un run corriendo ya no bloquee arregla de paso el agujero por el que un mensaje
+  // llegado durante un «Esperar N minutos» no disparaba nada y no dejaba rastro.
+  waitingConversationId String?
+  // Cuando tiene que despertar, si esta aparcado por TIEMPO. Su reloj de verdad es el `delay`
+  // del job en Redis; esto es la copia en Postgres para que el barrido pueda reponerlo si
+  // Redis se vacia — el `reponerCrons` de los runs.
+  reanudarEn DateTime?
+  // Cuando se le acaba la paciencia, si esta esperando que contesten. Sin esto, un cliente que
+  // no contesta nunca dejaba la conversacion bloqueada para siempre.
+  caducaEn   DateTime?
+  // Cuantas veces lo ha revivido el barrido. Revivir es seguro (la unique `(runId, nodeId)`
+  // impide repetir un paso, asi que un mensaje no sale dos veces), pero sin tope un run que
+  // muere siempre se re-encolaria en bucle.
+  vecesRevivido Int @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   tenant     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   automation Automation          @relation(fields: [automationId], references: [id], onDelete: Cascade)
   steps      AutomationRunStep[]
 
-  @@unique([tenantId, activeConversationId])
+  @@unique([tenantId, waitingConversationId])
   @@index([tenantId, status])
   @@index([automationId])
 }

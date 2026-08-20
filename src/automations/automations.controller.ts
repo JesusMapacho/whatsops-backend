@@ -107,6 +107,22 @@ export class AutomationsController {
     return this.automations.runs(user.tenantId, id, Number(limit) || 20);
   }
 
+  // Las de TODO el negocio, con la automatización de cada una: la pregunta «¿qué disparó este
+  // mensaje?», que con las ejecuciones solo por automatización no se podía contestar.
+  @Get('automation-runs')
+  @RequirePermissions('automations:manage')
+  todosLosRuns(@CurrentUser() user: AuthUser, @Query('limit') limit?: string) {
+    return this.automations.todosLosRuns(user.tenantId, Number(limit) || 30);
+  }
+
+  // Desbloquear a mano lo que el barrido tardaría en recoger. Mismo permiso: cancelar un run
+  // es menos invasivo que desactivar la automatización, que ya va con este.
+  @Post('automation-runs/:id/cancel')
+  @RequirePermissions('automations:manage')
+  cancelarRun(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.automations.cancelarRun(user.tenantId, id);
+  }
+
   @Delete('automations/:id')
   @RequirePermissions('automations:manage')
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {

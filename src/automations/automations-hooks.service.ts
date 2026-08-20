@@ -93,20 +93,24 @@ export class AutomationsHooksService {
       conversationId: (contexto.conversacion as { id: string | null }).id,
       contexto,
     });
-    // `null` = la unique `(tenantId, activeConversationId)`: ya hay un run vivo en esa
-    // conversación. Se dice con un 409 y no con un 200: un 200 le hace creer al sistema
-    // externo que su llamada surtió efecto.
-    if (!run) throw new ConflictException('Ya hay una automatización en curso con ese contacto.');
+    // `null` = la unique `(tenantId, waitingConversationId)`: ya hay un run APARCADO esperando
+    // la respuesta de ese contacto. Se dice con un 409 y no con un 200: un 200 le hace creer al
+    // sistema externo que su llamada surtió efecto.
+    //
+    // Ojo al cambio de la feature 41: antes chocaba con cualquier run vivo en esa conversación
+    // y ahora solo con uno que esté esperando respuesta, así que este 409 es bastante más raro.
+    if (!run) throw new ConflictException('Ya hay una automatización esperando la respuesta de ese contacto.');
 
     try {
       await this.cola.add('run', { runId: run.id });
     } catch (e) {
-      // Sin esto el run queda `running` sin job: colgado para siempre y —si resolvió
-      // conversación— bloqueándola por `activeConversationId`. Aquí lo provoca un
-      // desconocido a voluntad, así que no puede quedarse como estaba.
+      // Sin esto el run queda `running` sin job. Desde la feature 41 el barrido lo recogería,
+      // pero aquí se cierra igual y en el acto: lo provoca un desconocido a voluntad llamando a
+      // una URL pública, y dejarle sembrar runs colgados que alguien tiene que barrer es una
+      // superficie de abuso, no un descuido.
       await this.prisma.automationRun.update({
         where: { id: run.id },
-        data: { status: 'failed', activeConversationId: null, error: 'No se pudo encolar el run.' },
+        data: { status: 'cortado', waitingConversationId: null, error: 'No se pudo encolar el run.' },
       });
       throw e;
     }
