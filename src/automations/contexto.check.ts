@@ -24,6 +24,60 @@ assert.strictEqual(interpolar('Hola {{contacto.apodo}}', ctx), 'Hola ');
 assert.strictEqual(interpolar('sin variables', ctx), 'sin variables');
 assert.strictEqual(interpolar('{{mensaje.texto}} x2 {{mensaje.texto}}', ctx), 'quiero precio x2 quiero precio');
 
+// --- interpolar con funciones (v10 feature 40) ---
+//
+// La gramática y las funciones se comprueban en `expresiones.check.ts`; aquí lo que se fija es
+// cómo se PEGAN al contexto, que es donde estaba el fallo que abrió la feature.
+const conLista = conVariable(ctx, 'habilidades', ['rayo', 'estática']);
+assert.strictEqual(
+  interpolar('Tiene {{vars.habilidades | unir:", "}}', conLista),
+  'Tiene rayo, estática',
+  'el caso de la spec',
+);
+assert.strictEqual(
+  interpolar('Tiene {{vars.habilidades}}', conLista),
+  'Tiene ["rayo","estática"]',
+  'SIN función sigue saliendo el JSON, con corchetes y comillas: por eso existe `unir`',
+);
+assert.strictEqual(
+  interpolar('Hola {{contacto.apodo | por_defecto:"amigo"}}', ctx),
+  'Hola amigo',
+  '`por_defecto` convierte el «Hola , tu pedido» en algo que el operador controla',
+);
+assert.strictEqual(
+  interpolar('Hola {{contacto.nombre | mayus}}', ctx),
+  'Hola ANA',
+  'una función sobre un valor que sí está',
+);
+assert.strictEqual(
+  interpolar('Hola {{contacto.nombre | fulanito}}', ctx),
+  'Hola Ana',
+  'una función inexistente NO borra el dato ni para el run',
+);
+
+// EL CASO QUE ABRIÓ LA FEATURE, y el que más importa que no cambie sin querer: es sintaxis de
+// JavaScript, no la nuestra, así que no parsea y el texto sale LITERAL hacia el cliente. Es
+// horrible a propósito, y es exactamente lo que el resaltado del editor pinta plano para
+// avisar antes de que lo lea una persona.
+assert.strictEqual(
+  interpolar("Tiene {{vars.habilidades.join(', ')}}", conLista),
+  "Tiene {{vars.habilidades.join(', ')}}",
+  'una llamada a método se queda literal, como antes de la feature',
+);
+assert.strictEqual(
+  interpolar('Hola {{vars.mi campo}}', ctx),
+  'Hola {{vars.mi campo}}',
+  'un espacio en la ruta sigue quedándose literal',
+);
+
+// La cadena de prototipos, ahora por el segundo camino: `campo:` recibe una clave que escribió
+// el operador y hace `obj[clave]` por su cuenta, sin pasar por el filtro de `valorDe`.
+assert.strictEqual(
+  interpolar('x{{mensaje | campo:"constructor"}}y', ctx),
+  'xy',
+  '`campo:"constructor"` no imprime una función ni su código fuente',
+);
+
 // --- conSalida ---
 const ctx2 = conSalida(ctx, 'n1', { id: 'd1' });
 assert.strictEqual(valorDe(ctx2, 'nodos.n1.id'), 'd1');

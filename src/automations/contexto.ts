@@ -20,6 +20,8 @@
 //                    escribe al crear el run y no cambia: la respuesta a un `wait.reply` NO
 //                    es un disparo nuevo (esa llega, como siempre, por `mensaje.texto`).
 
+import { LLAVES, aplicar, claveSegura, parseExpresion } from './expresiones';
+
 export type Contexto = Record<string, unknown>;
 
 /**
@@ -35,25 +37,37 @@ export function valorDe(ctx: Contexto, ruta: string): unknown {
     // como `interpolar` solo trata aparte los `object`, acababa imprimiendo su código
     // fuente en un mensaje a un cliente. Con el cuerpo de un webhook —anidado y de fuera—
     // eso pasa de rareza a alcanzable.
-    if (parte === '__proto__' || parte === 'constructor' || parte === 'prototype') return undefined;
+    //
+    // El predicado vive en `expresiones.ts` porque ahora hay DOS caminos hasta un
+    // `obj[clave]` escrita por el operador: la ruta y el argumento de `campo:`.
+    if (!claveSegura(parte)) return undefined;
     actual = (actual as Record<string, unknown>)[parte];
   }
   return actual;
 }
 
-// Mismo `{{ }}` que las plantillas de Meta (`messaging/template-params.ts`) y que los
-// masivos del v5: el operador ya conoce esa sintaxis, no se le enseña una segunda.
-const VAR = /\{\{\s*([A-Za-z0-9_.]+)\s*\}\}/g;
-
 /**
- * Sustituye `{{ruta}}` por su valor. Una variable que no existe se sustituye por **vacío**
- * y no por el literal `{{nombre}}`: el texto sale hacia un cliente real, y «Hola
- * {{nombre}}» es peor que «Hola».
+ * Sustituye `{{ruta}}` —y ahora `{{ruta | funcion:arg}}`— por su valor.
+ *
+ * Dos contratos que no cambian, y son los importantes porque el texto sale hacia un cliente
+ * real:
+ * - Una variable que existe pero no resuelve se sustituye por **vacío**, no por el literal:
+ *   «Hola {{nombre}}» es peor que «Hola».
+ * - Lo que **no parsea** se queda **literal**, exactamente como antes se quedaba lo que no
+ *   casaba la regex. `{{x.join(', ')}}` es sintaxis de JS, no nuestra, y sigue saliendo tal
+ *   cual — que es horrible, y justo por eso el editor lo pinta plano para avisar antes.
+ *
+ * La gramática (`LLAVES`) y las funciones viven en `expresiones.ts`, en un solo sitio.
  */
 export function interpolar(texto: string, ctx: Contexto): string {
-  return texto.replace(VAR, (_, ruta: string) => {
-    const v = valorDe(ctx, ruta);
+  return texto.replace(LLAVES, (crudo, dentro: string) => {
+    const e = parseExpresion(dentro);
+    if (!e) return crudo;
+    const v = aplicar(valorDe(ctx, e.ruta), e.funciones);
     if (v === undefined || v === null) return '';
+    // `JSON.stringify` es el último recurso para un objeto al que no se le puso una función
+    // que lo formatee: sale con corchetes y comillas, y se ve mal a propósito. Para eso está
+    // `unir`.
     return typeof v === 'object' ? JSON.stringify(v) : String(v);
   });
 }
@@ -100,9 +114,12 @@ export function contextoDeMensaje(msg: {
 }
 
 /**
- * Nombre de variable válido. Tiene que ser alcanzable desde `{{vars.<nombre>}}`, y el
- * `VAR` de arriba solo acepta `[A-Za-z0-9_.]`: un nombre con un punto («a.b») partiría la
- * ruta en dos y un nombre con espacio no lo encontraría nunca.
+ * Nombre de variable válido. Tiene que ser alcanzable desde `{{vars.<nombre>}}`, y la parte
+ * de RUTA de una expresión solo acepta `[A-Za-z0-9_.]` (`RUTA` en `expresiones.ts`): un
+ * nombre con un punto («a.b») partiría la ruta en dos y uno con espacio no lo encontraría
+ * nunca. Sigue siendo más estricto que `RUTA` en el primer carácter, a propósito: una ruta
+ * puede tener un segmento numérico (el índice de un array), un nombre que elige el operador
+ * no.
  */
 export const NOMBRE_VAR = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

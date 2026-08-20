@@ -5,6 +5,7 @@
 // sin manual. Un motor de expresiones aquí sería un lenguaje que nadie puede depurar
 // cuando la automatización le mande el mensaje equivocado a un cliente.
 import { Contexto, valorDe } from './contexto';
+import { aplicar, parseExpresion } from './expresiones';
 
 export const OPERADORES = ['eq', 'neq', 'contains', 'gt', 'lt', 'matches'] as const;
 export type Operador = (typeof OPERADORES)[number];
@@ -63,6 +64,19 @@ export function comparar(op: Operador, izq: unknown, der: unknown): boolean {
   }
 }
 
+/**
+ * El «Campo» de un nodo de lógica es una ruta CRUDA (sin llaves), pero admite la misma
+ * tubería de funciones que `{{...}}`: `vars.lista | cuenta` comparado contra 3 es «si la
+ * lista tiene más de tres». Sin esto, contar elementos obliga a pagar un `code.run` —un
+ * proceso hijo— para algo que es una función de una línea.
+ *
+ * Si no parsea, se resuelve como ruta pelada: es lo que hacía antes y no rompe nada guardado.
+ */
+function valorDelCampo(ctx: Contexto, campo: string): unknown {
+  const e = parseExpresion(campo);
+  return e ? aplicar(valorDe(ctx, e.ruta), e.funciones) : valorDe(ctx, campo);
+}
+
 /** `logic.condition`: devuelve la rama `'true'` o `'false'` que el motor busca en las aristas. */
 export function ramaDeCondicion(
   config: { campo?: unknown; operador?: unknown; valor?: unknown },
@@ -70,7 +84,7 @@ export function ramaDeCondicion(
 ): 'true' | 'false' {
   const campo = typeof config.campo === 'string' ? config.campo : '';
   const op = esOperador(config.operador) ? config.operador : 'eq';
-  return comparar(op, valorDe(ctx, campo), config.valor) ? 'true' : 'false';
+  return comparar(op, valorDelCampo(ctx, campo), config.valor) ? 'true' : 'false';
 }
 
 /**
@@ -82,7 +96,7 @@ export function ramaDeSwitch(
   ctx: Contexto,
 ): string | null {
   const campo = typeof config.campo === 'string' ? config.campo : '';
-  const actual = valorDe(ctx, campo);
+  const actual = valorDelCampo(ctx, campo);
   const casos = Array.isArray(config.casos) ? config.casos : [];
   for (const c of casos) {
     const nombre = typeof (c as any)?.rama === 'string' ? (c as any).rama : null;

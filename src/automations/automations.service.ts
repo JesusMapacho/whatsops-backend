@@ -11,6 +11,7 @@ import { catalogoPublico, nodeType, validarConfig, validarTrigger } from './cata
 import { problemasDelGrafo } from './graph';
 import { patronCron } from './triggers';
 import { NOMBRE_VAR } from './contexto';
+import { catalogoDeFunciones, problemasDeFunciones } from './expresiones';
 import { AUTOMATION_QUEUE } from './automations.queue';
 import { nuevoTokenDeHook, urlDelHook } from './hooks';
 
@@ -28,6 +29,10 @@ export class AutomationsService {
 
   catalogo() {
     return catalogoPublico();
+  }
+
+  funciones() {
+    return catalogoDeFunciones();
   }
 
   // --- Constantes del negocio (`{{ajustes.<name>}}`) ------------------------------------
@@ -278,7 +283,11 @@ export class AutomationsService {
       });
     }
 
-    const problemas = problemasDelGrafo(a.nodes, a.edges);
+    // Las funciones inexistentes se dicen AQUÍ y no en ejecución: un filtro mal escrito es un
+    // error de configuración, y el sitio donde se dice un error de configuración es la
+    // pantalla donde se configura. En ejecución `aplicar` no lanza —devuelve el valor sin
+    // transformar— así que sin esta puerta el operador no se enteraría nunca.
+    const problemas = [...problemasDelGrafo(a.nodes, a.edges), ...problemasDeFunciones(a.nodes)];
     if (problemas.length) throw new BadRequestException(problemas.join(' '));
     // Revalida el trigger guardado: pudo entrar cuando el catálogo tenía otra forma.
     const trigger = validarTrigger(a.trigger);

@@ -19,6 +19,15 @@ export class AutomationsController {
     return this.automations.catalogo();
   }
 
+  // Las funciones de `{{ruta | funcion:arg}}`, también en código e iguales para todos. Van
+  // por la API y NO copiadas a mano en el frontend: así una función nueva aparece en el
+  // autocompletado y se pinta como función sin tocar la pantalla.
+  @Get('automation-functions')
+  @RequirePermissions('automations:manage')
+  funciones() {
+    return this.automations.funciones();
+  }
+
   // Las constantes del negocio (`{{ajustes.<name>}}`). Un PUT que reemplaza el juego
   // entero, igual que `PUT /automations/:id/graph`: es una pantalla con un botón de
   // guardar, no un CRUD fila a fila.

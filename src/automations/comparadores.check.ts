@@ -50,4 +50,47 @@ assert.strictEqual(ramaDeSwitch({ campo: 'deal.amount', casos }, { deal: { amoun
 assert.strictEqual(ramaDeSwitch({ campo: 'deal.amount', casos }, { deal: { amount: 0 } }), null, 'ninguno → salida por defecto');
 assert.strictEqual(ramaDeSwitch({ campo: 'deal.amount', casos: 'no es lista' }, ctx), null);
 
+// --- El «Campo» admite tuberías (v10 feature 40) ---
+//
+// El campo de un nodo de lógica es una ruta cruda, sin llaves, pero pasa por el mismo
+// lenguajito. Sin esto, «si la lista tiene más de tres» obliga a meter un `code.run` —un
+// proceso hijo— para contar elementos.
+const conLista = { vars: { lista: ['a', 'b', 'c', 'd'], nombre: 'Ana', vacio: null } };
+assert.strictEqual(
+  ramaDeCondicion({ campo: 'vars.lista | cuenta', operador: 'gt', valor: 3 }, conLista),
+  'true',
+  'cuatro elementos son más de tres',
+);
+assert.strictEqual(
+  ramaDeCondicion({ campo: 'vars.lista | cuenta', operador: 'gt', valor: 4 }, conLista),
+  'false',
+);
+assert.strictEqual(
+  ramaDeCondicion({ campo: 'vars.nombre | mayus', operador: 'eq', valor: 'ANA' }, conLista),
+  'true',
+);
+assert.strictEqual(
+  ramaDeCondicion({ campo: 'vars.vacio | por_defecto:"nada"', operador: 'eq', valor: 'nada' }, conLista),
+  'true',
+  '`por_defecto` también sirve para comparar lo que falta',
+);
+assert.strictEqual(
+  ramaDeCondicion({ campo: 'vars.lista', operador: 'eq', valor: 'x' }, conLista),
+  'false',
+  'una ruta pelada sigue funcionando igual que antes: no rompe nada guardado',
+);
+assert.strictEqual(
+  ramaDeCondicion({ campo: "vars.lista.join(', ')", operador: 'eq', valor: 'a, b, c, d' }, conLista),
+  'false',
+  'la sintaxis de JS no parsea aquí tampoco: se cae a ruta pelada, que no resuelve',
+);
+assert.strictEqual(
+  ramaDeSwitch(
+    { campo: 'vars.lista | cuenta', casos: [{ rama: 'muchos', operador: 'gt', valor: 2 }] },
+    conLista,
+  ),
+  'muchos',
+  'y en el switch igual',
+);
+
 console.log('comparadores.check OK');
