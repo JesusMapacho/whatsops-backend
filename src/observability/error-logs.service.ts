@@ -19,12 +19,19 @@ export interface ErrorLogFilters {
 export class ErrorLogsService implements OnModuleInit {
   private readonly logger = new Logger('ErrorLogs');
   private readonly retentionDays: number;
+  private readonly auditRetentionDays: number;
 
   constructor(
     private readonly prisma: PrismaService,
     config: ConfigService,
   ) {
     this.retentionDays = Number(config.get('ERRORLOG_RETENTION_DAYS') ?? 30);
+    // Retención propia para el rastro de accesos cross-tenant. Iba con la de los errores
+    // (30 días), y no es lo mismo: un 500 de hace un mes no le importa a nadie, pero
+    // «quién leyó los datos de qué cliente» es justo lo que se pregunta tarde.
+    this.auditRetentionDays = Number(
+      config.get('PLATFORM_AUDIT_RETENTION_DAYS') ?? 365,
+    );
   }
 
   // Retención: purga al arrancar y cada 24h. ponytail: setInterval simple;
@@ -37,15 +44,38 @@ export class ErrorLogsService implements OnModuleInit {
   }
 
   async purge() {
-    if (!this.retentionDays || this.retentionDays <= 0) return;
-    const cutoff = new Date(Date.now() - this.retentionDays * 24 * 60 * 60 * 1000);
+    const dia = 24 * 60 * 60 * 1000;
+    // Dos purgas sobre la misma tabla, con retenciones distintas y filtradas por
+    // `errorCode`: los errores por un lado y la auditoría de plataforma por otro.
+    await this.purgarGrupo(
+      'ErrorLog',
+      this.retentionDays,
+      { errorCode: { not: 'PLATFORM_AUDIT' } },
+      dia,
+    );
+    await this.purgarGrupo(
+      'auditoría de plataforma',
+      this.auditRetentionDays,
+      { errorCode: 'PLATFORM_AUDIT' },
+      dia,
+    );
+  }
+
+  private async purgarGrupo(
+    etiqueta: string,
+    dias: number,
+    where: { errorCode: unknown },
+    dia: number,
+  ) {
+    if (!dias || dias <= 0) return; // 0 o negativo desactiva esa purga
+    const cutoff = new Date(Date.now() - dias * dia);
     try {
       const { count } = await this.prisma.errorLog.deleteMany({
-        where: { createdAt: { lt: cutoff } },
+        where: { createdAt: { lt: cutoff }, ...(where as any) },
       });
-      if (count) this.logger.log(`Purga de ErrorLog: ${count} registros > ${this.retentionDays}d`);
+      if (count) this.logger.log(`Purga de ${etiqueta}: ${count} registros > ${dias}d`);
     } catch (e: any) {
-      this.logger.error(`Purga falló: ${e?.message ?? e}`);
+      this.logger.error(`Purga de ${etiqueta} falló: ${e?.message ?? e}`);
     }
   }
 

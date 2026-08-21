@@ -32,9 +32,14 @@ export class PlatformGuard implements CanActivate {
 
     // Auditar el acceso cross-tenant (quién, qué, sobre qué tenant, cuándo).
     const path = (req.originalUrl ?? req.url ?? '').split('?')[0] || '/';
+    // El `:id` solo es un tenant en las rutas de tenants. Antes se guardaba siempre, así
+    // que en `PATCH /platform/broadcasts/:id` esta columna acababa con un id de envío y en
+    // `POST /platform/users/:id/reset-mfa` con un id de usuario: la columna decía una cosa
+    // y contenía otra, y «¿a qué cliente accedió?» no se podía contestar con ella.
+    const tenantId = /^\/platform\/tenants\//.test(path) ? (req.params?.id ?? null) : null;
     void this.audit.audit({
       actorUserId: user.userId,
-      tenantId: req.params?.id ?? null,
+      tenantId,
       method: req.method,
       path,
       action: `super-admin ${req.method} ${path}`,
