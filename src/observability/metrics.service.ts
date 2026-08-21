@@ -1,11 +1,13 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import { WEBHOOK_QUEUE } from '../webhook/webhook.service';
 import { BILLING_QUEUE } from '../billing/billing.service';
 import { WAHA_QUEUE } from '../waha/waha.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { estadoWaha } from '../waha/waha.client';
 
 // Instrumentación Prometheus. Etiquetas ACOTADAS (method/route/status/tenant);
 // nunca userId/teléfono/ID libres (cardinalidad). El detalle por usuario sale
@@ -18,13 +20,20 @@ export class MetricsService {
   readonly httpErrors: Counter<string>;
   private readonly queueJobs: Gauge<string>;
   private readonly wahaSessions: Gauge<string>;
+  private readonly wahaUp: Gauge<string>;
+  private readonly wahaUrl: string;
+  private readonly wahaKey: string;
 
   constructor(
     @InjectQueue(WEBHOOK_QUEUE) private readonly webhookQueue: Queue,
     @InjectQueue(BILLING_QUEUE) private readonly billingQueue: Queue,
     @InjectQueue(WAHA_QUEUE) private readonly wahaQueue: Queue,
     private readonly prisma: PrismaService,
+    config: ConfigService,
   ) {
+    this.wahaUrl = (config.get<string>('WAHA_URL') ?? '').replace(/\/$/, '');
+    this.wahaKey = config.get<string>('WAHA_API_KEY') ?? '';
+
     collectDefaultMetrics({ register: this.registry });
 
     this.httpDuration = new Histogram({
@@ -63,6 +72,22 @@ export class MetricsService {
       labelNames: ['status'],
       registers: [this.registry],
     });
+
+    // ¿Responde la instancia de WAHA? 1 = sí, 0 = no, ausente = no configurada.
+    //
+    // Existe porque `waha_sessions` NO sirve para esto y es una trampa: se deriva de
+    // `WabaConnection`, y con el contenedor caído la reconciliación no toca nada a
+    // propósito («un blip de red no es una sesión perdida», waha.service.ts). Las filas se
+    // quedan congeladas en WORKING, así que el gauge sigue reportando sesiones sanas, la UI
+    // dice «conectado» y Grafana lo confirma mientras nadie recibe un solo mensaje.
+    //
+    // Cualquier alerta colgada del otro gauge hereda esa mentira. Esta se mide contra la
+    // instancia de verdad, en cada scrape.
+    this.wahaUp = new Gauge({
+      name: 'waha_up',
+      help: 'La instancia WAHA responde (1) o no (0)',
+      registers: [this.registry],
+    });
   }
 
   observe(method: string, route: string, status: number, tenant: string, seconds: number) {
@@ -90,8 +115,16 @@ export class MetricsService {
       }
     }
 
+    // Alcanzabilidad real de la instancia. Se pregunta en cada scrape (cada 15 s) porque
+    // es un `GET /api/sessions` a loopback: más barato que el error de creer que todo está
+    // bien durante media hora.
+    const estado = await estadoWaha(this.wahaUrl, this.wahaKey);
+    if (estado === 'disabled') this.wahaUp.reset();
+    else this.wahaUp.set(estado === 'up' ? 1 : 0);
+
     // Sesiones WAHA por estado. El estado lo mantiene al día la reconciliación
-    // (waha.service), así que aquí basta con contar filas.
+    // (waha.service), así que aquí basta con contar filas. OJO: esto refleja la DB, no la
+    // instancia — para saber si WAHA responde está `waha_up`.
     try {
       const rows = await this.prisma.wabaConnection.groupBy({
         by: ['status'],

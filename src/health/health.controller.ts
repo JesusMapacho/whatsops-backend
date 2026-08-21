@@ -1,7 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Public } from '../auth/public.decorator';
-import { ping } from '../waha/waha.client';
+import { estadoWaha } from '../waha/waha.client';
 
 @Controller('health')
 export class HealthController {
@@ -19,16 +19,6 @@ export class HealthController {
   @Public()
   @Get()
   async check() {
-    return { status: 'ok', waha: await this.wahaStatus() };
-  }
-
-  private async wahaStatus(): Promise<'up' | 'down' | 'disabled'> {
-    if (!this.wahaUrl || !this.wahaKey) return 'disabled';
-    try {
-      await ping(this.wahaUrl, this.wahaKey);
-      return 'up';
-    } catch {
-      return 'down';
-    }
+    return { status: 'ok', waha: await estadoWaha(this.wahaUrl, this.wahaKey) };
   }
 }

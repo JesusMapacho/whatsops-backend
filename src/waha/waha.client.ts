@@ -402,3 +402,23 @@ export async function fetchQr(
     data: buffer.toString('base64'),
   };
 }
+
+/**
+ * Estado de la instancia: `disabled` si no está configurada, `up`/`down` según responda.
+ *
+ * Vive aquí y no en el controlador de salud porque lo usan dos: `GET /health` y el gauge
+ * `waha_up` de las métricas. Si cada uno lo calculara por su cuenta podrían discrepar, y
+ * entonces la alerta y la página de estado dirían cosas distintas del mismo hecho.
+ */
+export async function estadoWaha(
+  baseUrl: string,
+  apiKey: string,
+): Promise<'up' | 'down' | 'disabled'> {
+  if (!baseUrl || !apiKey) return 'disabled';
+  try {
+    await ping(baseUrl, apiKey);
+    return 'up';
+  } catch {
+    return 'down';
+  }
+}
