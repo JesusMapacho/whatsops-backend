@@ -75,7 +75,11 @@ const key = '11111111-1111-1111-1111-111111111111';
 const exp = String(Date.now() + 60_000);
 const sig = signMedia(key, exp, secret);
 assert.equal(verifyMedia(key, exp, sig, secret), true);
-assert.equal(verifyMedia(key, exp, sig.replace(/.$/, '0'), secret), false, 'firma alterada');
+// El secreto es aleatorio, así que `sig` cambia en cada corrida: `replace(/.$/, '0')` no
+// alteraba nada cuando el último dígito hex ya era un 0 y este assert fallaba 1 de cada 16
+// veces. Se cambia el último carácter por otro distinto, sea el que sea.
+const alterada = sig.slice(0, -1) + (sig.endsWith('0') ? '1' : '0');
+assert.equal(verifyMedia(key, exp, alterada, secret), false, 'firma alterada');
 assert.equal(verifyMedia(key, String(Date.now() - 1), signMedia(key, String(Date.now() - 1), secret), secret), false, 'exp vencido');
 assert.equal(verifyMedia(key, exp, signMedia(key, exp, randomBytes(32)), secret), false, 'otro secreto');
 
