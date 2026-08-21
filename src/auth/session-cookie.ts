@@ -77,11 +77,25 @@ export function clearSession(res: CookieSink): void {
  * Emite la cookie y devuelve el cuerpo **sin** el token: si el JWT viaja en el JSON, el
  * frontend tiene que guardarlo en algún sitio y volvemos a `localStorage`. Lo usan las
  * tres puertas que abren sesión: login, registro y aceptar una invitación.
+ *
+ * **Y es donde se hace valer el segundo factor.** Esta función es el único punto de todo el
+ * backend que escribe `Set-Cookie`, así que el freno vive aquí y no en `login()`: puesto en
+ * `login()` habría que acordarse tres veces, y la de aceptar una invitación es justo la que
+ * se olvida. `mfaPendiente` es un campo **obligatorio** del parámetro a propósito — el
+ * compilador obliga a resolverlo en cada puerta nueva, en vez de dejar que un default lo
+ * tape. Lo calcula `AuthService.sign()`, que es por donde pasan las tres.
+ *
+ * Si salta, es un **bug** y no un estado del usuario: `login` ya devuelve el desafío antes
+ * de llegar aquí. De ahí un `Error` pelado y un 500 ruidoso, que es como tiene que fallar
+ * «casi emitimos una sesión saltándonos el segundo factor».
  */
 export function openSession<T>(
   res: CookieSink,
-  sesion: { accessToken: string; user: T },
+  sesion: { accessToken: string; user: T; mfaPendiente: boolean },
 ): { user: T } {
+  if (sesion.mfaPendiente) {
+    throw new Error('No se puede abrir sesión: falta el segundo factor.');
+  }
   setSession(res, sesion.accessToken);
   return { user: sesion.user };
 }

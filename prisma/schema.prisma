@@ -293,6 +293,29 @@ model User {
   phone         String?  // E.164
   phoneVerified Boolean  @default(false)
   emailVerified Boolean  @default(false)
+
+  // Segundo factor (TOTP). Genérico en `User` a propósito, aunque hoy solo se EXIJA a las
+  // cuentas `isPlatform`: encenderlo para admins de tenant será cambiar una condición en
+  // `mfa.ts`, no migrar la tabla.
+  //
+  // El secreto va cifrado con `CryptoService` (AES-256-GCM), como los `accessTokenEnc`: es
+  // una credencial de acceso, no un dato. `redact.ts` tapa por substring `secret`, así que
+  // el nombre lo cubre en logs gratis.
+  totpSecretEnc   String?
+  // Enrolamiento terminado. Tener secreto sin confirmar NO cuenta como segundo factor:
+  // sería dejar fuera a quien empezó a enrolar y cerró la pestaña.
+  totpConfirmedAt DateTime?
+  // Anti-replay. Se rechaza todo contador <= a este. Sin él, un código visto por encima
+  // del hombro sirve el resto de su ventana de 30 s más la tolerancia.
+  totpLastCounter Int?
+  // Freno de fuerza bruta sin tabla nueva: seis dígitos son un millón de combinaciones y
+  // sin límite se agotan.
+  totpFailures    Int       @default(0)
+  totpLockedUntil DateTime?
+  // Códigos de respaldo con hash bcrypt, de un solo uso: se sacan del array al consumirse.
+  // Array de Postgres para no añadir tabla ni join por diez cadenas.
+  recoveryCodeHashes String[]
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
