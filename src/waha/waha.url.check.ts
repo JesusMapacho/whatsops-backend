@@ -24,11 +24,13 @@ assert.strictEqual(
   wahaMediaUrl('http://localhost:3000/api/files/a.jpg?x-api-key=k', 'http://127.0.0.1:3002'),
   'http://127.0.0.1:3002/api/files/a.jpg?x-api-key=k',
 );
-// El host del payload NUNCA se honra: aunque apunte a metadata de la nube, la
-// petición sale contra NUESTRA base. Ahí está la propiedad de seguridad.
+// El host del payload NUNCA se honra: aunque apunte a metadata de la nube, la petición
+// saldría contra NUESTRA base. Y ahora además la ruta no cuela, así que sale `null`: antes
+// esto devolvía `http://127.0.0.1:3002/latest/meta-data/` —inofensivo hacia la nube, pero
+// era una petición autenticada a una ruta que elige un tercero.
 assert.strictEqual(
   wahaMediaUrl('http://169.254.169.254/latest/meta-data/', 'http://127.0.0.1:3002'),
-  'http://127.0.0.1:3002/latest/meta-data/',
+  null,
 );
 // Sin base o con URL basura no se inventa nada.
 assert.strictEqual(wahaMediaUrl('http://x/y', ''), null);
@@ -38,6 +40,31 @@ assert.strictEqual(wahaMediaUrl('no-es-url', 'http://127.0.0.1:3002'), null);
 // Las URLs de media vienen DENTRO del payload, o sea que las controla quien opera la
 // instancia (con BYO, el tenant). La key solo puede viajar al mismo origen.
 assert.ok(sameOrigin('http://waha:3000/api/files/x.jpg', 'http://waha:3000'));
+
+// La ruta del payload también está acotada, no solo el host: sin esto, `fetchPayloadBinary`
+// haría un GET a la API de WAHA CON la api key y guardaría la respuesta como adjunto.
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/sessions', 'http://127.0.0.1:3002'),
+  null,
+  'un endpoint de la API de WAHA no es un archivo',
+);
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/t_x/auth/qr', 'http://127.0.0.1:3002'),
+  null,
+  'el QR de una sesión tampoco',
+);
+// Travesía relativa: `URL` normaliza el pathname, así que no cuela.
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/files/../sessions', 'http://127.0.0.1:3002'),
+  null,
+  'los .. los resuelve URL antes de que los veamos',
+);
+// Y el camino legítimo sigue funcionando (ya afirmado arriba, se repite el borde del
+// prefijo exacto: /api/filesX no es /api/files/).
+assert.strictEqual(
+  wahaMediaUrl('http://localhost:3000/api/filesecretos', 'http://127.0.0.1:3002'),
+  null,
+);
 assert.ok(sameOrigin('http://waha:3000/otra/ruta', 'http://waha:3000/'));
 // Puerto, esquema o host distintos = otro origen.
 assert.ok(!sameOrigin('http://waha:3001/x', 'http://waha:3000'));

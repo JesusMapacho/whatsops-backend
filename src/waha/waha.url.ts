@@ -81,11 +81,23 @@ export async function assertSafeBaseUrl(raw: string): Promise<string> {
 //
 // Tomando solo la ruta se consiguen las dos cosas: funciona, y el host del payload
 // deja de importar — nunca seguimos a donde nos diga un tercero.
+//
+// Pero pinear el host no basta, y esta es la parte que faltaba: la RUTA seguía viniendo del
+// payload, y `fetchPayloadBinary` le adjunta la api key por ser mismo origen. Un
+// `media.url` con ruta `/api/sessions` convertía esto en un GET autenticado a la API de
+// WAHA cuya respuesta se guarda como adjunto legible en la bandeja — o sea el config de
+// todas las sesiones, claves HMAC incluidas. De ahí el prefijo: WAHA sirve los binarios
+// bajo /api/files/, y nada más de su API se parece a un archivo.
+const RUTA_DE_ARCHIVOS = '/api/files/';
+
 export function wahaMediaUrl(payloadUrl: string, baseUrl: string): string | null {
   if (!baseUrl) return null;
   try {
     const u = new URL(payloadUrl);
     const base = new URL(baseUrl);
+    // `pathname` ya viene normalizado por `URL` (los `..` y los `%2e` resueltos), así que
+    // esto no se puede burlar con un travesía relativa.
+    if (!u.pathname.startsWith(RUTA_DE_ARCHIVOS)) return null;
     return `${base.origin}${u.pathname}${u.search}`;
   } catch {
     return null;

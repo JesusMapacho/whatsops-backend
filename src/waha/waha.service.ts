@@ -236,18 +236,28 @@ export class WahaService implements OnModuleInit {
 
     // Se agrupan por instancia: la gestionada (baseUrl null) y las BYO. Así se
     // lista una vez por instancia en vez de una por conexión.
-    const byInstance = new Map<string, typeof conns>();
+    //
+    // La clave del grupo es `baseUrl` + **la api key descifrada**, no solo `baseUrl`. Antes
+    // era solo la URL y se usaba `group[0].accessTokenEnc` para todo el grupo: como
+    // `baseUrl` lo elige el tenant en BYO, dos tenants que declararan la misma URL acababan
+    // operados con la credencial de uno sobre la sesión del otro. Se descifra por fila (son
+    // microsegundos) y no por grupo, porque AES-GCM lleva IV aleatorio: el mismo secreto da
+    // ciphertext distinto en cada fila, así que agrupar por `accessTokenEnc` no juntaría nada.
+    const byInstance = new Map<
+      string,
+      { baseUrl: string; apiKey: string; conns: typeof conns }
+    >();
     for (const c of conns) {
-      const key = c.baseUrl ?? this.wahaUrl;
-      if (!key) continue;
-      const list = byInstance.get(key) ?? [];
-      list.push(c);
-      byInstance.set(key, list);
+      const baseUrl = c.baseUrl ?? this.wahaUrl;
+      if (!baseUrl) continue;
+      const apiKey = this.crypto.decrypt(c.accessTokenEnc);
+      const clave = JSON.stringify([baseUrl, apiKey]);
+      const grupo = byInstance.get(clave) ?? { baseUrl, apiKey, conns: [] };
+      grupo.conns.push(c);
+      byInstance.set(clave, grupo);
     }
 
-    for (const [baseUrl, group] of byInstance) {
-      // La api key va cifrada por fila; todas las de una instancia comparten la misma.
-      const apiKey = this.crypto.decrypt(group[0].accessTokenEnc);
+    for (const { baseUrl, apiKey, conns: group } of byInstance.values()) {
       let remote;
       try {
         remote = await listSessions(baseUrl, apiKey);
@@ -297,6 +307,12 @@ export class WahaService implements OnModuleInit {
       }
 
       // Huérfanas: existen en la instancia pero ya no tienen fila.
+      //
+      // Solo en la instancia GESTIONADA. En una BYO el servidor es del tenant y puede
+      // sostener sesiones que no son nuestras —de otro cliente suyo, o de él mismo— y este
+      // barrido las borraría por no tener fila en nuestra base. No limpiamos servidores
+      // ajenos: la huérfana de una BYO la borra su dueño.
+      if (group[0].baseUrl !== null) continue;
       for (const name of orphanSessions(
         remote.map((s) => s.name),
         group.map((c) => c.phoneNumberId),
