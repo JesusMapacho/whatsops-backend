@@ -98,14 +98,27 @@ export interface Ejecucion {
 export const TOPE_ESPERA_MIN = 7 * 24 * 60;
 
 /**
- * La rama por la que sigue «Esperar respuesta» cuando el contacto no contesta a tiempo.
+ * La rama de caducidad de «Esperar respuesta» **ya no tiene nombre acordado**, y eso es a
+ * propósito.
  *
- * El nombre está aquí y **copiado a mano en `canvas.ts` del frontend**, igual que la regex de
- * `{{...}}`: `ramasDe()` decide cuántos puertos se dibujan y tiene que coincidir con lo que
- * `siguienteNodoId` busca aquí. Si se cambia en un sitio y no en el otro, el operador cablea
- * una arista a una rama que el motor no mira nunca — y no da error, simplemente no pasa nada.
+ * Había una constante `RAMA_SIN_RESPUESTA = 'sin-respuesta'` aquí y otra copiada a mano en
+ * `canvas.ts` del frontend, con un comentario en cada lado avisando de que tenían que
+ * coincidir. El fallo que describían es real y silencioso: si divergían, el operador cableaba
+ * una arista a una rama que el motor no miraba nunca y no pasaba nada. Y con el frontend en
+ * otro repo, «si tocas uno, toca el otro» deja de ser una convención posible — los archivos
+ * ya no se ven.
+ *
+ * Así que el motor la busca **por estructura y no por nombre**: `wait.reply` ofrece dos
+ * salidas, la de «contestó» (rama `null`) y la de caducidad, así que la de caducidad es la
+ * única con nombre. `sinRespuesta()` busca eso. El nombre exacto lo elige el editor y al
+ * motor le da igual, o sea que no puede haber deriva porque no hay nada compartido que
+ * derive. Los grafos ya guardados con `'sin-respuesta'` siguen funcionando sin migración.
+ *
+ * ponytail: la afirmación de la que esto depende es «wait.reply tiene exactamente una rama con
+ * nombre», y se comprueba donde se produce el dato: `canvas.check.ts` del frontend. Techo: el
+ * día que `wait.reply` tenga tres salidas hay que volver a distinguirlas, y entonces sí toca
+ * un nombre en el contrato — que es el sitio donde va, no una constante en cada repo.
  */
-export const RAMA_SIN_RESPUESTA = 'sin-respuesta';
 
 /** Paciencia por defecto de «Esperar respuesta», en horas. El porqué del 24, en su `ayuda`. */
 export const CADUCIDAD_RESPUESTA_H = 24;

@@ -16,7 +16,7 @@ import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
 import { Contexto, conSalida, conVariable } from './contexto';
-import { RAMA_SIN_RESPUESTA, Salida, Servicios, interpolarConfig, nodeType } from './catalog';
+import { Salida, Servicios, interpolarConfig, nodeType } from './catalog';
 import { MAX_REVIVIDOS, queHacerCon } from './barrido';
 import { nodoRaiz, siguienteNodoId } from './graph';
 import { patronCron } from './triggers';
@@ -148,7 +148,11 @@ export class AutomationsProcessor extends WorkerHost {
     // `currentNodeId` apunta al nodo SIGUIENTE al de la espera (el motor lo adelanta antes de
     // dormirse), así que la rama se busca desde el de la espera: el que tiene la arista.
     const espera = aristas.find((a) => a.toNodeId === run.currentNodeId && a.branch === null);
-    const salida = espera && aristas.find((a) => a.fromNodeId === espera.fromNodeId && a.branch === RAMA_SIN_RESPUESTA);
+    // La rama de caducidad se identifica por ESTRUCTURA y no por nombre: `wait.reply` ofrece
+    // «contestó» (rama `null`) y la de caducidad, así que la de caducidad es la única con
+    // nombre. Antes se comparaba contra un literal que el frontend tenía copiado a mano, y
+    // divergir dejaba la arista muerta en silencio. El porqué completo, en `catalog.ts`.
+    const salida = espera && aristas.find((a) => a.fromNodeId === espera.fromNodeId && a.branch !== null);
 
     if (!salida) {
       return this.cerrar(run, 'cortado', 'El contacto no contestó a tiempo, y no hay una rama «no contestó» a donde seguir.');
