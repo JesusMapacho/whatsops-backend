@@ -1,0 +1,146 @@
+# Reglas de alerta de WhatsOps.
+#
+# El tablero llevaba cinco paneles y CERO alertas: el gauge estaba listo desde la feature 27
+# y nadie le colgó nada. Un panel solo avisa si alguien lo está mirando.
+#
+# OJO con la primera regla y por qué existe: `waha_sessions` se deriva de `WabaConnection`,
+# y con el contenedor de WAHA caído la reconciliación no toca nada a propósito («un blip de
+# red no es una sesión perdida», waha.service.ts). Las filas se quedan congeladas en WORKING,
+# así que ese gauge sigue reportando sesiones sanas mientras nadie recibe un solo mensaje.
+# Por eso se alarma sobre `waha_up`, que se mide contra la instancia de verdad en cada
+# scrape. Cualquier alerta colgada del otro gauge hereda la mentira.
+#
+# Los avisos van a `grafana-default-email`, que es el contacto que Grafana trae de fábrica y
+# NO tiene servidor de correo configurado: las alertas se ven en la UI de Grafana pero no
+# salen a ningún sitio hasta que se cablee SMTP o un webhook. Está así a propósito — mejor
+# que inventar un contacto que aparente funcionar.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: whatsops
+    folder: WhatsOps
+    interval: 1m
+    rules:
+      # --- La instancia no responde ---------------------------------------------------
+      - uid: waha-caido
+        title: WAHA no responde
+        condition: alerta
+        for: 2m # dos scrapes seguidos: un fallo aislado no despierta a nadie
+        noDataState: NoData
+        execErrState: Alerting
+        annotations:
+          summary: La instancia de WAHA no responde; nadie está recibiendo mensajes.
+          description: >
+            `waha_up` está en 0. OJO: el panel de sesiones seguirá mostrando WORKING, porque
+            se deriva de la base y la reconciliación no toca nada cuando la instancia no
+            contesta. No te fíes de ese panel para esto.
+        labels:
+          gravedad: critica
+        data:
+          - refId: consulta
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: consulta
+              expr: waha_up
+              instant: true
+          - refId: alerta
+            datasourceUid: __expr__
+            model:
+              refId: alerta
+              type: threshold
+              expression: consulta
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # --- Caen las sesiones emparejadas ----------------------------------------------
+      - uid: waha-sesiones-working
+        title: Sesiones WAHA activas por debajo de lo esperado
+        condition: alerta
+        for: 5m
+        noDataState: OK # sin ningún tenant en la capa gratuita no hay nada que vigilar
+        execErrState: Alerting
+        annotations:
+          summary: Hay tenants que dejaron de recibir por WhatsApp.
+          description: >
+            Ninguna sesión en WORKING. Si `waha_up` está bien, entonces el problema es del
+            emparejamiento (sesiones caídas o sin escanear), no de la instancia.
+        labels:
+          gravedad: alta
+        data:
+          - refId: consulta
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: consulta
+              expr: sum(waha_sessions{status="WORKING"})
+              instant: true
+          - refId: alerta
+            datasourceUid: __expr__
+            model:
+              refId: alerta
+              type: threshold
+              expression: consulta
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+
+      # --- La cola del webhook se atasca ---------------------------------------------
+      # Va aquí y no solo como panel porque una cola atascada tiene un efecto que nadie
+      # relaciona: el `WebhookEvent` se crea sin tenant y solo el worker se lo pone, así que
+      # mientras la cola no avanza, los mensajes entrantes ni se guardan ni disparan
+      # automatizaciones.
+      - uid: cola-webhook-atascada
+        title: Cola de webhooks atascada
+        condition: alerta
+        for: 5m
+        noDataState: NoData
+        execErrState: Alerting
+        annotations:
+          summary: Los mensajes entrantes se están acumulando sin procesarse.
+        labels:
+          gravedad: alta
+        data:
+          - refId: consulta
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: consulta
+              expr: sum(bullmq_jobs{queue="webhook-events",state="waiting"})
+              instant: true
+          - refId: alerta
+            datasourceUid: __expr__
+            model:
+              refId: alerta
+              type: threshold
+              expression: consulta
+              conditions:
+                - evaluator: { type: gt, params: [200] }
+
+      # --- Errores 5xx ----------------------------------------------------------------
+      - uid: errores-5xx
+        title: Tasa de error 5xx elevada
+        condition: alerta
+        for: 5m
+        noDataState: OK
+        execErrState: Alerting
+        annotations:
+          summary: La API está devolviendo 5xx de forma sostenida.
+        labels:
+          gravedad: alta
+        data:
+          - refId: consulta
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: consulta
+              expr: sum(rate(http_request_errors_total{status=~"5.."}[5m]))
+              instant: true
+          - refId: alerta
+            datasourceUid: __expr__
+            model:
+              refId: alerta
+              type: threshold
+              expression: consulta
+              conditions:
+                - evaluator: { type: gt, params: [0.2] }

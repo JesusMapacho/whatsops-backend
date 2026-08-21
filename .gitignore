@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+# Copias del .env antes de tocarlo (p. ej. `.env.bak-pre-5433`). Llevan los mismos secretos
+# que el original, así que la regla de arriba no basta: no casa con los sufijos.
+.env.bak*
+*.log
+# Adjuntos en disco de LocalDiskStorage. La barra del principio ancla la regla a la raíz del
+# repo: sin ella, el patrón casaría también con `src/storage/`, que es un módulo del código.
+/storage/

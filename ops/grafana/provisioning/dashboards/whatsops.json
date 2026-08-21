@@ -1,0 +1,83 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "WhatsOps — API & Colas",
+  "uid": "whatsops-api",
+  "tags": ["whatsops"],
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(http_requests_total, tenant)",
+        "includeAll": true,
+        "multi": false,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Latencia por ruta (p50 / p95 / p99)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50 {{route}}", "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{tenant=~\"$tenant\"}[5m])) by (le, route))" },
+        { "refId": "B", "legendFormat": "p95 {{route}}", "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{tenant=~\"$tenant\"}[5m])) by (le, route))" },
+        { "refId": "C", "legendFormat": "p99 {{route}}", "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{tenant=~\"$tenant\"}[5m])) by (le, route))" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Throughput (req/s por ruta)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{route}}", "expr": "sum(rate(http_requests_total{tenant=~\"$tenant\"}[5m])) by (route)" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tasa de error (por status)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{status}}", "expr": "sum(rate(http_request_errors_total{tenant=~\"$tenant\"}[5m])) by (status)" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Jobs BullMQ por cola/estado",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{queue}} {{state}}", "expr": "bullmq_jobs" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Sesiones WAHA por estado (capa gratuita)",
+      "description": "Si cae el número de WORKING, hay tenants que dejaron de recibir. MISSING = la sesión ya no existe en la instancia y hay que re-emparejar.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{status}}", "expr": "waha_sessions" }
+      ]
+    }
+  ]
+}

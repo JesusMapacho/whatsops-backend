@@ -1,0 +1,136 @@
+services:
+  postgres:
+    # pgvector/pgvector:pg16 = postgres:16 + extensión vector (Rama B del asistente).
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-whatsops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whatsops}
+      POSTGRES_DB: ${POSTGRES_DB:-whatsops}
+    ports:
+      # 127.0.0.1 y no 0.0.0.0, igual que WAHA (ver abajo el porqué). Lo mismo en redis,
+      # prometheus y grafana: son servicios de apoyo que solo consume el backend del host,
+      # y publicarlos en todas las interfaces los deja alcanzables desde la red en cuanto
+      # este compose toque un servidor. Redis además no lleva contraseña.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whatsops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  waha:
+    # WAHA = WhatsApp HTTP API NO oficial (automatiza WhatsApp Web). Transporte de
+    # la capa gratuita: el usuario empareja su número por QR (v5 feature 26).
+    # Tag `noweb` = engine por WebSocket, sin Chromium: imagen chica y muchas
+    # sesiones por servidor.
+    # ponytail: tag flotante. Este contenedor guarda las credenciales de WhatsApp de TODOS
+    # los tenants, así que un `pull` trae código de terceros con acceso a todas ellas.
+    # Antes de producción, pinear por digest:
+    #   docker image inspect devlikeapro/waha:noweb --format '{{index .RepoDigests 0}}'
+    # y pegar el resultado aquí, dejando el tag en este comentario.
+    image: devlikeapro/waha:noweb
+    restart: unless-stopped
+    ports:
+      # SOLO loopback, a propósito. La api key de WAHA es de INSTANCIA: quien
+      # alcance este puerto con ella puede leer y enviar como el WhatsApp de
+      # cualquier tenant. Nunca publicar al mundo.
+      - "127.0.0.1:${WAHA_PORT:-3002}:3000"
+    environment:
+      # El default es público (está en .env.example) y sirve solo para dev: el puerto es
+      # loopback. Lo que impide que llegue a producción no es este archivo, es
+      # `backend/src/config/env.validation.ts`, que se niega a arrancar con un valor de
+      # ejemplo salvo que COOKIE_SECURE=false. Si aquí queda el default y el backend lleva
+      # una key real, todo da 401 — ruidoso, que es como debe fallar.
+      WAHA_API_KEY: ${WAHA_API_KEY:-dev-waha-key}
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      # El dashboard trae admin/admin por defecto y Swagger expone toda la API.
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      # Reanudar las sesiones emparejadas al reiniciar el contenedor.
+      WHATSAPP_RESTART_ALL_SESSIONS: "true"
+    volumes:
+      # Sin este volumen se pierde el estado de auth y hay que re-escanear el QR
+      # en cada reinicio.
+      - wahasessions:/app/.sessions
+    # WAHA postea los webhooks al backend, que corre en el host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Techo de recursos: un pico de sesiones no debe comerse la máquina ni
+    # degradar la API. Dimensionado (engine NOWEB): 50 sesiones ≈ 2 CPU / 4 GB,
+    # 500 ≈ 30 GB. Con GOWS bajaría a ~1.5 CPU / 3 GB para 50.
+    deploy:
+      resources:
+        limits:
+          cpus: "${WAHA_CPUS:-2}"
+          memory: ${WAHA_MEMORY:-4g}
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # El backend corre en el host; permite a Prometheus alcanzarlo.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # La API, para desplegar. **No arranca en local**: lleva `profiles`, así que un
+  # `docker compose up -d` a secas la ignora y sigues desarrollando con `npm run start:dev`
+  # contra los servicios de arriba, que es más rápido y trae recarga en caliente. Para
+  # levantarla de verdad: `docker compose --profile prod up -d --build`.
+  backend:
+    profiles: ["prod"]
+    build: .
+    restart: unless-stopped
+    # El mismo `.env` que lee Nest en local y que compose usa para interpolar aquí. Un solo
+    # archivo: es lo que impide que la api key de WAHA descuadre entre los dos.
+    env_file: .env
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      # Adjuntos de LocalDiskStorage. Sin volumen, cada `--build` se lleva por delante los
+      # medios de todos los tenants.
+      - storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  grafanadata:
+  wahasessions:
+  storage:

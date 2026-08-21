@@ -1,0 +1,15 @@
+# Lo que NO entra en el contexto de build. `node_modules` sobre todo: se instala dentro con
+# `npm ci` y copiarlo desde el host mete binarios compilados para otro sistema — el fallo
+# clásico de Prisma y de bcrypt.
+node_modules
+dist
+.git
+# El `.env` de verdad NUNCA entra en la imagen: las variables se inyectan al correr
+# (`env_file` en compose). Una imagen con secretos dentro es una imagen que no se puede
+# publicar ni compartir.
+.env
+.env.bak*
+# Adjuntos de los tenants. Van en un volumen, no en la imagen.
+storage
+ops
+*.log

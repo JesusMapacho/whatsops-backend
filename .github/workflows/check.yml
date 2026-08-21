@@ -1,0 +1,29 @@
+# Lo único que corre en CI, y a propósito: los checks. Son 55 archivos `*.check.ts` con
+# `node:assert` que no tocan base ni red, así que pasan o fallan por sí mismos en cualquier
+# máquina. `nest build` va detrás porque `npm run check` corre los checks con ts-node y no
+# comprueba los tipos del resto del código: un import roto en un servicio no lo vería.
+#
+# No hay paso de despliegue aquí. El despliegue es `git pull && docker compose up -d --build`
+# en el servidor, y meterlo en CI pediría guardar una credencial del servidor en GitHub por
+# una comodidad que todavía no se ha echado en falta.
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # El cliente de Prisma es código generado: sin esto, cualquier import de
+      # `@prisma/client` no compila en una máquina limpia.
+      - run: npx prisma generate
+      - run: npm run check
+      - run: npm run build
