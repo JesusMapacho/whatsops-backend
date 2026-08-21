@@ -3,7 +3,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { WEBHOOK_QUEUE } from './webhook.service';
-import { buildWebhookEventWhere, WebhookEventFilter } from './webhook-events.util';
+import { buildWebhookEventWhere, webhookEventScope, WebhookEventFilter } from './webhook-events.util';
 
 @Injectable()
 export class WebhookEventsService {
@@ -32,8 +32,11 @@ export class WebhookEventsService {
   }
 
   async get(tenantId: string, id: string) {
+    // Mismo alcance que la lista: el tenant ve los suyos, y solo el super-admin ve
+    // los no atribuibles. Sin esto, `rawPayload` (sin redactar) de un evento en vuelo
+    // de otro negocio se leería con solo tener su id.
     const event = await this.prisma.webhookEvent.findFirst({
-      where: { id, OR: [{ tenantId }, { tenantId: null }] },
+      where: { id, ...webhookEventScope(tenantId) },
     });
     if (!event) throw new NotFoundException('Evento no encontrado');
     return event;
