@@ -10,5 +10,9 @@ import { InvitationsService } from './invitations.service';
   imports: [PrismaModule, AuthModule],
   controllers: [InvitationsController],
   providers: [InvitationsService],
+  // Lo exporta para PlatformModule: invitar a un compañero de plataforma reusa este mismo
+  // flujo (token de un solo uso, 7 días, contraseña que pone la persona) con el tenant de
+  // plataforma, en vez de tener un segundo camino de alta que se desincronice.
+  exports: [InvitationsService],
 })
 export class InvitationsModule {}

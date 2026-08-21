@@ -10,6 +10,7 @@ import { UserRole } from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
+import { PLATFORM_TENANT_ID } from '../platform/platform.constants';
 import { AuthService } from '../auth/auth.service';
 import { caducaEn, correosDe, esCorreo, MAX_POR_ENVIO, vigente } from './correos';
 
@@ -198,6 +199,16 @@ export class InvitationsService {
             // admin da el bypass de PermissionsGuard.
             role: (esAdmin ? 'admin' : 'agent') as UserRole,
             roleId,
+            // Una invitación al tenant de plataforma crea un super-admin. Se DERIVA del
+            // tenant en vez de llevar una columna propia en `Invitation`: así no hay dos
+            // sitios donde el dato pueda desincronizarse, y «estar en el tenant de
+            // plataforma» sigue significando exactamente lo mismo que `isPlatform`
+            // (asunción de la que dependen `webhookEventScope` y la siembra por env).
+            //
+            // No se le abre sesión saltándose nada: `openSession` exige el segundo factor
+            // y `requiereSegundoFactor` lo pide a todo `isPlatform`, así que quien acepte
+            // esta invitación cae directo al enrolamiento.
+            isPlatform: inv.tenantId === PLATFORM_TENANT_ID,
           },
         });
         await tx.invitation.update({

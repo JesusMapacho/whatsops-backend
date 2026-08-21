@@ -4,6 +4,9 @@ import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { PLATFORM_TENANT_ID } from './platform.constants';
+import { RolesService } from '../roles/roles.service';
+import { InvitationsService } from '../invitations/invitations.service';
+import { MfaService } from '../auth/mfa.service';
 
 const PLATFORM_TENANT_NAME = 'WhatsOps Platform';
 
@@ -14,6 +17,9 @@ export class PlatformService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly roles: RolesService,
+    private readonly invitations: InvitationsService,
+    private readonly mfa: MfaService,
   ) {}
 
   // Siembra el super-admin (isPlatform) en un tenant de plataforma aparte, desde
@@ -23,28 +29,75 @@ export class PlatformService implements OnModuleInit {
     const password = this.config.get<string>('PLATFORM_ADMIN_PASSWORD');
     if (!email || !password) return; // opcional: sin env, no se siembra
 
+    // `onboardingComplete: true` porque el tenant de plataforma no pasa por el asistente
+    // de registro. Sin esto, `sign()` devuelve false y el frontend manda al super-admin a
+    // /registro en vez de a la consola.
     const tenant = await this.prisma.tenant.upsert({
       where: { id: PLATFORM_TENANT_ID },
-      create: { id: PLATFORM_TENANT_ID, name: PLATFORM_TENANT_NAME },
+      create: { id: PLATFORM_TENANT_ID, name: PLATFORM_TENANT_NAME, onboardingComplete: true },
       update: {},
     });
-    const existing = await this.prisma.user.findFirst({ where: { email: email.toLowerCase() } });
+
+    // La búsqueda va acotada AL TENANT DE PLATAFORMA, y esto no es un detalle.
+    //
+    // Antes era `findFirst({ where: { email } })` sin tenant y, si encontraba algo, le
+    // ponía `isPlatform: true` dejándolo en su tenant original. Pero el email es único
+    // **por tenant** (`@@unique([tenantId, email])`), no globalmente: si un cliente se
+    // registraba con el mismo correo que PLATFORM_ADMIN_EMAIL, el siguiente arranque
+    // convertía al usuario de ese cliente en super-admin cross-tenant. Y encima
+    // `users.service.ts#list` no filtra `isPlatform`, así que aparecía en la lista de su
+    // propio equipo.
+    //
+    // Ahora un choque de correos **falla y se dice**, en vez de resolverse solo por el
+    // camino peor. Y con esto `isPlatform` y «estar en el tenant de plataforma» vuelven a
+    // ser lo mismo, que es lo que asume `webhookEventScope` para decidir el alcance
+    // cross-tenant de la auditoría de webhooks.
+    const lower = email.toLowerCase();
+    const ajeno = await this.prisma.user.findFirst({
+      where: { email: lower, tenantId: { not: PLATFORM_TENANT_ID } },
+      select: { id: true, tenantId: true },
+    });
+    if (ajeno) {
+      this.logger.error(
+        `PLATFORM_ADMIN_EMAIL (${lower}) ya lo usa un usuario del tenant ${ajeno.tenantId}. ` +
+          'No se siembra nada: usa un correo que no tenga ningún cliente.',
+      );
+      return;
+    }
+
+    const existing = await this.prisma.user.findFirst({
+      where: { email: lower, tenantId: PLATFORM_TENANT_ID },
+    });
     if (existing) {
       if (!existing.isPlatform) {
         await this.prisma.user.update({ where: { id: existing.id }, data: { isPlatform: true } });
+        this.logger.log(`Super-admin restaurado: ${lower}`);
       }
       return;
     }
+    // Los roles de sistema del tenant de plataforma: `RolesModule` corre ANTES que este
+    // módulo (app.module.ts), así que en el primer arranque el tenant todavía no existía y
+    // el super-admin nacía con `roleId: null`, rellenado por accidente en el segundo
+    // arranque. Sembrarlos aquí lo arregla en el primero.
+    const roleId = await this.roles
+      .ensureSystemRoles(tenant.id)
+      .then((r) => r.adminRoleId)
+      .catch((e: Error) => {
+        this.logger.warn(`No se pudieron sembrar los roles de plataforma: ${e.message}`);
+        return null;
+      });
+
     await this.prisma.user.create({
       data: {
         tenantId: tenant.id,
-        email: email.toLowerCase(),
+        roleId,
+        email: lower,
         passwordHash: await bcrypt.hash(password, 10),
         role: 'admin',
         isPlatform: true,
       },
     });
-    this.logger.log(`Super-admin sembrado: ${email}`);
+    this.logger.log(`Super-admin sembrado: ${lower}`);
   }
 
   async listTenants(search?: string) {
@@ -247,6 +300,92 @@ export class PlatformService implements OnModuleInit {
       });
     }
     return { id, status: 'canceled', canceled: count };
+  }
+
+  // --- Usuarios de plataforma (§9) -----------------------------------------------------
+  //
+  // Hasta ahora la única forma de tener un super-admin era la siembra por env, o un UPDATE
+  // a mano. Esto permite dar de alta compañeros de revisión sin tocar el servidor, y por
+  // `PlatformGuard` cada operación queda auditada.
+  //
+  // Reusa el flujo de invitaciones tal cual (token de un solo uso, 7 días, contraseña que
+  // pone la propia persona). El `isPlatform` lo deriva `invitations.service` del tenant.
+
+  async listPlatformUsers() {
+    return this.prisma.user.findMany({
+      where: { isPlatform: true },
+      select: {
+        id: true,
+        email: true,
+        status: true,
+        createdAt: true,
+        // Para poder ver de un golpe quién no ha enrolado todavía el segundo factor.
+        totpConfirmedAt: true,
+        totpLockedUntil: true,
+        // Nunca `totpSecretEnc` ni `recoveryCodeHashes`: son credenciales. Solo el conteo.
+        recoveryCodeHashes: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    }).then((us) =>
+      us.map(({ recoveryCodeHashes, ...u }) => ({
+        ...u,
+        segundoFactor: u.totpConfirmedAt ? 'activo' : 'sin enrolar',
+        respaldoRestante: recoveryCodeHashes.length,
+      })),
+    );
+  }
+
+  /** Invita a un compañero al tenant de plataforma. Devuelve el enlace una sola vez. */
+  async invitePlatformUser(invitedById: string, body: any) {
+    const { adminRoleId } = await this.roles.ensureSystemRoles(PLATFORM_TENANT_ID);
+    return this.invitations.create(PLATFORM_TENANT_ID, invitedById, {
+      ...body,
+      // El rol dentro del tenant de plataforma es siempre admin: `isPlatform` no es un
+      // permiso ni un rol, y el RBAC del tenant de plataforma no gobierna nada.
+      roleId: adminRoleId,
+    });
+  }
+
+  /**
+   * Desactiva o reactiva a un compañero. No se borra: `status: 'disabled'` corta el login
+   * y conserva la atribución de lo que hizo, igual que en `users.service.ts`.
+   */
+  async updatePlatformUser(actorUserId: string, id: string, body: any) {
+    const user = await this.mustPlatformUser(id);
+    if (user.id === actorUserId) {
+      throw new BadRequestException('No puedes desactivarte a ti mismo.');
+    }
+    const status = body?.status;
+    if (status !== 'active' && status !== 'disabled') {
+      throw new BadRequestException('status tiene que ser active o disabled');
+    }
+    await this.prisma.user.update({ where: { id }, data: { status } });
+    return { id, status };
+  }
+
+  /**
+   * Resetea el segundo factor de un compañero: el camino de recuperación que NO baja el
+   * techo de nada (§4). Queda auditado por `PlatformGuard`.
+   *
+   * **Nadie se resetea a sí mismo.** Si se permitiera, quien robe una cookie viva de
+   * plataforma se saltaría el segundo factor entero: entra, se lo resetea y enrola su
+   * propio teléfono. El auto-servicio para «perdí el teléfono» son los códigos de
+   * respaldo, que exigen tener uno.
+   */
+  async resetPlatformMfa(actorUserId: string, id: string) {
+    const user = await this.mustPlatformUser(id);
+    if (user.id === actorUserId) {
+      throw new BadRequestException(
+        'No puedes resetear tu propio segundo factor. Usa un código de respaldo, o pídeselo a otro admin de plataforma.',
+      );
+    }
+    return this.mfa.reset(id);
+  }
+
+  private async mustPlatformUser(id: string) {
+    const user = await this.prisma.user.findFirst({ where: { id, isPlatform: true } });
+    if (!user) throw new NotFoundException('Usuario de plataforma no encontrado');
+    return user;
   }
 
   async updateTenant(id: string, body: any) {

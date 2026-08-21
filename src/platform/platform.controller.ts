@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Patch,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import { PlatformService } from './platform.service';
 import { PlatformGuard } from './platform.guard';
 import { ErrorLogsService } from '../observability/error-logs.service';
 import { MetricsNegocioService } from '../analytics/metrics-negocio.service';
+import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 
 // Consola de plataforma (super-admin). Todo cross-tenant y auditado por el guard.
 @UseGuards(PlatformGuard)
@@ -61,6 +63,36 @@ export class PlatformController {
   @Patch('broadcasts/:id')
   cancelBroadcast(@Param('id') id: string, @Body() body: any) {
     return this.platform.cancelBroadcast(id, body);
+  }
+
+  // --- Usuarios de plataforma (§9) ------------------------------------------------------
+  // Compañeros de revisión. Todos nacen con segundo factor OBLIGATORIO: `openSession` no
+  // emite cookie sin él, así que aceptar la invitación cae directo al enrolamiento.
+
+  @Get('users')
+  listPlatformUsers() {
+    return this.platform.listPlatformUsers();
+  }
+
+  /** Devuelve el enlace de invitación UNA vez: no hay correo saliente en este producto. */
+  @Post('users')
+  invitePlatformUser(@CurrentUser() user: AuthUser, @Body() body: any) {
+    return this.platform.invitePlatformUser(user.userId, body);
+  }
+
+  @Patch('users/:id')
+  updatePlatformUser(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() body: any,
+  ) {
+    return this.platform.updatePlatformUser(user.userId, id, body);
+  }
+
+  /** Recuperación de un compañero que perdió el teléfono. Nunca sobre uno mismo. */
+  @Post('users/:id/reset-mfa')
+  resetPlatformMfa(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.platform.resetPlatformMfa(user.userId, id);
   }
 
   // Agregados de negocio de un tenant (cross-tenant, auditado por el guard).
