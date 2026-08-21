@@ -6,8 +6,15 @@
 // una frontera de seguridad: es un aislamiento de *ámbito*, no de *permisos*, y salirse es
 // un clásico de una línea (`this.constructor.constructor('return process')()`). El que
 // escribe aquí es el admin de UN negocio; que pudiera leer los tokens de los demás sería el
-// peor fallo posible del producto. El hijo arranca con `env: {}`, sin argumentos y sin nada
-// nuestro dentro, así que escaparse del vm no lleva a ningún sitio.
+// peor fallo posible del producto.
+//
+// **Por qué `env: {}` no bastaba.** Era el argumento original y estaba incompleto: escapar
+// del vm da un Node entero, con `fs` y con el `cwd` del worker. `readFileSync('.env')`
+// entrega ENCRYPTION_KEY —la clave con la que se descifran los `accessTokenEnc` de todos
+// los tenants—, JWT_SECRET, DATABASE_URL y WAHA_API_KEY. Vaciar el entorno no sirve si los
+// secretos también están en un archivo que el proceso puede leer. De ahí el modelo de
+// permisos de Node: sin `--allow-fs-read` no hay disco, y de paso caen `child_process` y
+// `worker_threads`. `env: {}` se queda igual, como segunda capa.
 //
 // **Doble serialización.** El `ctx` entra como literal dentro del programa y el resultado
 // sale por `JSON.stringify` DENTRO del vm. Así ningún objeto del host cruza la frontera en
@@ -17,7 +24,12 @@
 // ponytail: un proceso por ejecución (~60 ms) y el runner por `node -e` en vez de un
 // archivo suelto (que habría que copiar a dist/ con `assets` en nest-cli.json y resolver
 // distinto en dev y en prod). Techo: si esto se llama miles de veces por minuto, un pool de
-// hijos reutilizados — y entonces el `env: {}` sigue siendo la parte que no se negocia.
+// hijos reutilizados — y entonces el flag de permisos sigue siendo la parte que no se negocia.
+//
+// ponytail: el modelo de permisos de Node **no cubre la red**. El hijo aún puede abrir un
+// socket a 127.0.0.1 (Redis sin contraseña, Postgres) aunque no tenga credenciales con las
+// que autenticarse. Techo aceptado: cerrarlo no es otro flag, es correr el hijo en un
+// contenedor sin red. Si algún día importa, ese es el camino.
 import { execFile } from 'node:child_process';
 import { Contexto } from './contexto';
 
@@ -26,6 +38,21 @@ const MAX_SALIDA = 16 * 1024;
 
 /** Milisegundos que se le dan al código antes de cortarlo. */
 export const TOPE_MS = 1000;
+
+/**
+ * El flag del modelo de permisos, que cambió de nombre: `--experimental-permission` en
+ * Node 20 y hasta 22.12, `--permission` desde 22.13. Se elige por versión porque pasar el
+ * que no existe es `bad option` y **todas** las ejecuciones morirían con exit 9.
+ *
+ * No hay rama de "este Node no lo soporta": en uno anterior a 20 el hijo no arranca y el
+ * nodo falla en vez de correr sin aislamiento. Es la única forma correcta de fallar aquí.
+ * `codigo.check.ts` lo comprueba de verdad, preguntándole a `process.permission`.
+ */
+export function flagDePermisos(version = process.versions.node): string {
+  const [major, minor] = version.split('.').map(Number);
+  const nuevo = major > 22 || (major === 22 && minor >= 13);
+  return nuevo ? '--permission' : '--experimental-permission';
+}
 
 // El runner, tal cual se le pasa a `node -e`. Lee `{codigo, ctx, topeMs}` por stdin y
 // escribe `{ok, valor}` o `{ok:false, error}` por stdout. En una sola cadena y sin
@@ -65,10 +92,11 @@ export function ejecutarCodigo(codigo: string, ctx: Contexto, topeMs = TOPE_MS):
   return new Promise((resolve, reject) => {
     const hijo = execFile(
       process.execPath,
-      ['-e', RUNNER],
-      // `env: {}` es la línea que hace segura toda esta función: sin DATABASE_URL ni la
-      // clave de cifrado, un escape del vm no alcanza nada. El timeout de aquí es la red
-      // de abajo del timeout del vm (que solo corta código síncrono).
+      [flagDePermisos(), '-e', RUNNER],
+      // Las dos líneas que hacen segura esta función: el flag de permisos (sin disco, así
+      // que un escape del vm no llega al `.env`) y `env: {}` (sin secretos en el entorno).
+      // El timeout de aquí es la red de abajo del timeout del vm (que solo corta código
+      // síncrono).
       { env: {}, timeout: topeMs + 2000, maxBuffer: MAX_SALIDA * 4, windowsHide: true },
       (err, stdout) => {
         if (err) {

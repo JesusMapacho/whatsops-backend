@@ -4,7 +4,7 @@
 // pruebas de aislamiento deja de pasar, el JS de un tenant alcanza el servidor y con él los
 // tokens de los demás. No las quites para hacerlo más rápido — lanzan procesos y sí, tardan.
 import assert from 'node:assert';
-import { ejecutarCodigo } from './codigo';
+import { ejecutarCodigo, flagDePermisos } from './codigo';
 
 const CTX = { vars: { peso: '7', zona: 'local' }, ajustes: { precio_kg: '12' }, nodos: {} };
 
@@ -54,19 +54,48 @@ async function main() {
     'el código no puede ver el proceso ni pedir módulos',
   );
 
-  // El escape clásico de node:vm. Aunque llegue a `process` (depende de la versión de V8),
-  // el hijo corre con `env: {}` y ahí no hay nada que robar: eso es lo que se comprueba.
+  // El nombre del flag por versión. Pasar el que no existe es `bad option` y mata TODAS
+  // las ejecuciones con exit 9, así que esta tabla es la que evita un despliegue roto.
+  assert.strictEqual(flagDePermisos('20.11.0'), '--experimental-permission');
+  assert.strictEqual(flagDePermisos('22.12.0'), '--experimental-permission');
+  assert.strictEqual(flagDePermisos('22.13.0'), '--permission');
+  assert.strictEqual(flagDePermisos('24.0.0'), '--permission');
+
+  // El escape clásico de node:vm. Se asume que FUNCIONA (depende de la versión de V8) y se
+  // comprueba que del otro lado no haya nada que robar. Dos capas, las dos afirmadas:
+  //
+  //   1. el entorno está vacío — no hay DATABASE_URL ni ENCRYPTION_KEY que leer;
+  //   2. el disco está denegado — que es lo que faltaba, porque esos mismos secretos están
+  //      en el `.env` y el hijo hereda el cwd del worker.
+  //
+  // Si el flag de permisos no llegara a aplicarse, `permiteLeer` saldría true y esto falla.
   const escape = await ejecutarCodigo(
     `try {
        const P = this.constructor.constructor('return process')();
-       return { salio: true, claves: Object.keys(P.env).length };
-     } catch (e) { return { salio: false, claves: 0 }; }`,
+       return {
+         salio: true,
+         claves: Object.keys(P.env).length,
+         permiteLeer: !P.permission || P.permission.has('fs.read'),
+         permiteProcesos: !P.permission || P.permission.has('child'),
+       };
+     } catch (e) { return { salio: false, claves: 0, permiteLeer: false, permiteProcesos: false }; }`,
     CTX,
   );
+  const e = escape as { claves: number; permiteLeer: boolean; permiteProcesos: boolean };
   assert.strictEqual(
-    (escape as { claves: number }).claves,
+    e.claves,
     0,
     'aunque se salga del vm, el proceso hijo no lleva ninguna variable de entorno encima',
+  );
+  assert.strictEqual(
+    e.permiteLeer,
+    false,
+    'el hijo NO debe poder leer disco: ahí está el .env con ENCRYPTION_KEY',
+  );
+  assert.strictEqual(
+    e.permiteProcesos,
+    false,
+    'el hijo NO debe poder lanzar procesos: sería la vuelta a un Node sin restricciones',
   );
 
   // --- errores, y que ninguno cuelgue el worker ----------------------------------------
