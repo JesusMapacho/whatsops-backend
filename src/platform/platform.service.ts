@@ -191,6 +191,60 @@ export class PlatformService implements OnModuleInit {
     });
     const coldByTenant = new Map(cold.map((s) => [s.tenantId, s._count._all]));
 
+    const ids = conns.map((c) => c.tenantId);
+
+    // Salientes FALLIDOS (§14.2). WAHA manda ack -1 y `ACK_STATUS` lo mapea a 'failed'
+    // (webhook/waha.ts). Un salto aquí es la señal más temprana de que WhatsApp está
+    // limitando o bloqueando ese número — antes de que el tenant se dé cuenta.
+    const fallidos = await this.prisma.message.groupBy({
+      by: ['tenantId'],
+      where: { direction: 'out', status: 'failed', createdAt: { gt: since }, tenantId: { in: ids } },
+      _count: { _all: true },
+    });
+    const fallidosPorTenant = new Map(fallidos.map((f) => [f.tenantId, f._count._all]));
+
+    // Salientes que NO pasaron por la app (§14.3): el dueño escribiendo desde su propio
+    // teléfono. `decode.ts` los marca con `payload.viaDevice`, y el eco está EXENTO del
+    // ritmo por contacto a propósito (docs/waha.md), así que un dueño blasteando desde su
+    // celular quema su número sin que el limitador lo frene y sin que nadie lo vea.
+    //
+    // Consulta por ruta JSON, como ya hace `searchWhere` con ['text','body']: no hace falta
+    // columna ni migración.
+    const porTelefono = await this.prisma.message.groupBy({
+      by: ['tenantId'],
+      where: {
+        direction: 'out',
+        createdAt: { gt: since },
+        tenantId: { in: ids },
+        payload: { path: ['viaDevice'], equals: true },
+      },
+      _count: { _all: true },
+    });
+    const porTelefonoPorTenant = new Map(porTelefono.map((v) => [v.tenantId, v._count._all]));
+
+    // Intentos BLOQUEADOS por los topes (§14.1). Es la mejor señal de las cuatro porque
+    // mide **intención y no volumen**: una mesa de soporte con 200 salientes legítimos tiene
+    // cero rechazos, mientras que quien choca cuarenta veces contra el tope por contacto
+    // está intentando spamear y `limits.ts` lo está frenando.
+    //
+    // Ya estaba todo guardado: `all-exceptions.filter.ts` persiste TODOS los HttpException
+    // con tenantId y statusCode, así que los 429 de `limits.ts` y los 400 de `lifecycle.ts`
+    // llevan meses acumulándose sin que nadie los sumara.
+    const frenados = await this.prisma.errorLog.groupBy({
+      by: ['tenantId'],
+      where: {
+        tenantId: { in: ids },
+        createdAt: { gt: since },
+        statusCode: { in: [400, 429, 503] },
+        // La auditoría de plataforma vive en la misma tabla con statusCode 200, pero se
+        // excluye igual: si algún día cambia, esto no debe empezar a contarla.
+        errorCode: { not: 'PLATFORM_AUDIT' },
+        path: { startsWith: '/conversations' },
+      },
+      _count: { _all: true },
+    });
+    const frenadosPorTenant = new Map(frenados.map((f) => [f.tenantId!, f._count._all]));
+
     return conns.map((c) => ({
       id: c.id,
       tenantId: c.tenantId,
@@ -205,6 +259,10 @@ export class PlatformService implements OnModuleInit {
       createdAt: c.createdAt,
       sentLast24h: sentByTenant.get(c.tenantId) ?? 0,
       coldLast24h: coldByTenant.get(c.tenantId) ?? 0,
+      // Las cuatro señales de §14. Ninguna necesitó columna nueva.
+      failedLast24h: fallidosPorTenant.get(c.tenantId) ?? 0,
+      viaDeviceLast24h: porTelefonoPorTenant.get(c.tenantId) ?? 0,
+      blockedLast24h: frenadosPorTenant.get(c.tenantId) ?? 0,
     }));
   }
 
