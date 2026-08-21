@@ -22,8 +22,16 @@ assert.deepStrictEqual(buildConversationWhere(T, 'open', U, 'admin'), {
 assert.deepStrictEqual(buildConversationWhere(T, undefined, U, 'admin'), { tenantId: T });
 assert.deepStrictEqual(buildConversationWhere(T, 'basura', U, 'admin'), { tenantId: T });
 
-// Agente: SIEMPRE limitado a las suyas o abiertas, ignore el filtro que pida.
-const agentWhere = { tenantId: T, OR: [{ assignedUserId: U }, { status: 'open' }] };
+// Agente: SIEMPRE limitado a las suyas o abiertas Y sin contactos privados, ignore el
+// filtro que pida. El alcance va dentro de un `AND` para que un filtro no pueda pisar la
+// clave (ver el bucle del final, y el comentario de `withExtra`).
+const agentWhere = {
+  tenantId: T,
+  AND: [
+    { OR: [{ assignedUserId: U }, { status: 'open' }] },
+    { contact: { privado: false } },
+  ],
+};
 assert.deepStrictEqual(buildConversationWhere(T, 'unassigned', U, 'agent'), agentWhere);
 assert.deepStrictEqual(buildConversationWhere(T, undefined, U, 'agent'), agentWhere);
 
@@ -33,10 +41,14 @@ assert.strictEqual(searched.tenantId, T);
 assert.strictEqual(searched.status, 'open');
 assert.strictEqual(searched.AND.length, 1);
 assert.ok(searched.AND[0].OR.some((c: any) => c.contact?.name?.contains === 'Juan'));
-// Agente: el scope suyas/abiertas se conserva aunque haya q.
+// Agente: el scope suyas/abiertas se conserva aunque haya q, y ahora comparte el `AND` con
+// el buscador. Los filtros se AÑADEN al AND que ya trae la base, nunca lo reemplazan: con
+// `{ ...base, AND: extra }` —como era antes— teclear una letra habría borrado el alcance
+// entero, incluidos los contactos privados.
 const agentSearched = buildConversationWhere(T, undefined, U, 'agent', 'hola') as any;
-assert.deepStrictEqual(agentSearched.OR, [{ assignedUserId: U }, { status: 'open' }]);
-assert.strictEqual(agentSearched.AND.length, 1);
+assert.strictEqual(agentSearched.AND.length, 3, 'rol + privados + buscador');
+assert.deepStrictEqual(agentSearched.AND[0].OR, [{ assignedUserId: U }, { status: 'open' }]);
+assert.deepStrictEqual(agentSearched.AND[1], { contact: { privado: false } });
 // assignedUserId sin q → un solo AND.
 const byAgent = buildConversationWhere(T, undefined, U, 'admin', undefined, 'u9') as any;
 assert.deepStrictEqual(byAgent.AND, [{ assignedUserId: 'u9' }]);
@@ -100,3 +112,42 @@ const noPic = shapeConversationRow(
 assert.strictEqual(noPic.contact.avatarUrl, null);
 
 console.log('conversations.check OK');
+
+// --- El alcance del agente sobrevive a TODOS los filtros -------------------------------
+//
+// Es el assert que de verdad protege: si alguno de estos deja de llevar el alcance, un
+// agente ve conversaciones que no le tocan —o los chats privados del dueño— con solo
+// mandar un query param. Se comprueba sobre el where FINAL, no sobre las piezas.
+const combinaciones: Array<[string | undefined, string | undefined, string | undefined]> = [
+  [undefined, undefined, undefined],
+  ['open', undefined, undefined],
+  ['mine', undefined, undefined],
+  ['unassigned', undefined, undefined],
+  ['frio', undefined, undefined],
+  ['basura-que-no-existe', undefined, undefined],
+  [undefined, 'hola', undefined],
+  [undefined, undefined, 'otro-usuario'],
+  ['frio', 'hola', 'otro-usuario'],
+];
+for (const [filtro, q, asignado] of combinaciones) {
+  const w = buildConversationWhere(T, filtro, U, 'agent', q, asignado) as any;
+  const etiqueta = `${filtro}/${q}/${asignado}`;
+  assert.strictEqual(w.tenantId, T, `el filtro ${etiqueta} perdió el tenant`);
+  const texto = JSON.stringify(w);
+  assert.ok(texto.includes('"privado":false'), `el filtro ${etiqueta} perdió los privados`);
+  assert.ok(
+    texto.includes('"assignedUserId":"user1"') || texto.includes('"status":"open"'),
+    `el filtro ${etiqueta} perdió el alcance por rol`,
+  );
+}
+
+// Y el admin (el dueño) SÍ ve sus propios contactos privados: son suyos.
+assert.ok(!JSON.stringify(buildConversationWhere(T, 'mine', U, 'admin', 'hola')).includes('privado'));
+
+// Cualquier rol que no sea `admin` queda fuera de los privados, incluido uno a medida.
+for (const rol of ['agent', 'supervisor', 'lo-que-sea', '']) {
+  assert.ok(
+    JSON.stringify(buildConversationWhere(T, undefined, U, rol)).includes('"privado":false'),
+    `el rol «${rol}» no debe ver contactos privados`,
+  );
+}

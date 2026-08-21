@@ -522,6 +522,17 @@ model Contact {
   // Chat de grupo (`@g.us`). El "contacto" es entonces el grupo, y el autor de
   // cada mensaje va en `Message.payload.author`.
   isGroup   Boolean  @default(false)
+  // Contacto privado del dueño: NO es del negocio y no lo ve el equipo.
+  //
+  // Existe porque emparejar por QR mete en la bandeja **todos** los chats del teléfono —el
+  // filtro de `decode.ts` es lista negra (`@newsletter`, `@broadcast`) y tiene que seguir
+  // siéndolo, o los `@lid` se perderían en silencio—, así que la familia, el médico y el
+  // banco del dueño acaban en una bandeja compartida donde `agentScope` deja que cualquier
+  // agente lea toda conversación `open`. Marcar el contacto es lo que lo saca de ahí.
+  //
+  // No borra nada ni corta la ingesta: los mensajes siguen entrando (perder el de un
+  // cliente mal marcado sería peor). Solo deja de ser visible para quien no es admin.
+  privado   Boolean  @default(false)
   // Foto de perfil ya descargada, guardada en el storage. Se refresca sola cada vez
   // que se abre el hilo (que es cuando ya se pedía a WAHA), y así la bandeja puede
   // pintarla sin una petición por fila: bajarla al vuelo para 200 conversaciones

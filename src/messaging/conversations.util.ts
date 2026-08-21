@@ -9,14 +9,28 @@ export type ConversationFilter = 'open' | 'mine' | 'unassigned' | 'frio';
 // cursor por `updatedAt`, que ya es el orden.
 export const INBOX_TAKE = 200;
 
-// Un agente solo puede ver/actuar sobre conversaciones suyas o abiertas.
-// El admin no tiene esta restricción.
+// Un agente solo puede ver/actuar sobre conversaciones suyas o abiertas, y **nunca** las de
+// un contacto marcado como privado. El admin no tiene esta restricción.
+//
+// Lo de `privado` no es una comodidad: emparejar por QR mete en la bandeja todos los chats
+// del teléfono del dueño (el filtro de `decode.ts` es lista negra a propósito), y como las
+// conversaciones nacen `open`, sin este `AND` cualquier agente leía la conversación del
+// dueño con su médico desde el primer mensaje.
+//
+// Va como `AND` y no dentro del `OR`: un filtro que se mezcle con el alcance por rol lo
+// puede pisar, y ese es el error de esta familia de funciones (ver el bucle de
+// conversations.util.check.ts, que lo comprueba sobre el where final).
 export function agentScope(
   role: string,
   userId: string,
 ): Prisma.ConversationWhereInput {
   if (role === 'admin') return {};
-  return { OR: [{ assignedUserId: userId }, { status: 'open' }] };
+  return {
+    AND: [
+      { OR: [{ assignedUserId: userId }, { status: 'open' }] },
+      { contact: { privado: false } },
+    ],
+  };
 }
 
 // Where de una conversación concreta con el alcance del agente aplicado.
@@ -56,8 +70,20 @@ export function buildConversationWhere(
   const extra: Prisma.ConversationWhereInput[] = [];
   if (q?.trim()) extra.push(searchWhere(q.trim()));
   if (assignedUserId) extra.push({ assignedUserId });
-  const withExtra = (base: Prisma.ConversationWhereInput): Prisma.ConversationWhereInput =>
-    extra.length ? { ...base, AND: extra } : base;
+
+  // Los filtros se AÑADEN al `AND` que ya trajera la base, nunca lo reemplazan.
+  //
+  // Antes era `{ ...base, AND: extra }`, que pisaba la clave. Con `agentScope` devolviendo
+  // ahora un `AND` (para excluir los contactos privados), esa línea habría borrado el
+  // alcance del agente en cuanto alguien escribiera en el buscador: teclear una letra
+  // abría la bandeja entera, incluidas las conversaciones privadas del dueño. Es el error
+  // clásico de esta familia de `build*Where` y por eso el check lo comprueba sobre el
+  // where final, filtro por filtro.
+  const withExtra = (base: Prisma.ConversationWhereInput): Prisma.ConversationWhereInput => {
+    if (!extra.length) return base;
+    const previos = base.AND ? (Array.isArray(base.AND) ? base.AND : [base.AND]) : [];
+    return { ...base, AND: [...previos, ...extra] };
+  };
 
   if (role !== 'admin') {
     return withExtra({ tenantId, ...agentScope(role, userId) });

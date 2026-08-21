@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { AuthUser, CurrentUser } from '../auth/current-user.decorator';
 import { RequirePermissions } from '../auth/permissions.decorator';
+import { Roles } from '../auth/roles.decorator';
 import { CrmContactsService } from './contacts.service';
 import { ActivitiesService } from './activities.service';
 
@@ -31,6 +32,17 @@ export class CrmContactsController {
   @RequirePermissions('deals:write')
   patch(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: unknown) {
     return this.contacts.patch(user.tenantId, id, body);
+  }
+
+  /**
+   * Marcar un contacto como privado del dueño. **Solo admin**, y no por `deals:write` como
+   * el resto de la ficha: quien puede desmarcarlo puede leer lo que oculta, así que el
+   * permiso de escribir tratos no alcanza.
+   */
+  @Patch(':id/privado')
+  @Roles('admin')
+  setPrivado(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: unknown) {
+    return this.contacts.setPrivado(user.tenantId, id, body);
   }
 
   // PUT y no PATCH: se manda el juego COMPLETO de etiquetas. Un POST/DELETE por etiqueta

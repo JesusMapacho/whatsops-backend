@@ -151,6 +151,30 @@ export class CrmContactsService {
   }
 
   /**
+   * Marca (o desmarca) un contacto como privado del dueño: deja de verlo el equipo.
+   *
+   * **Va aparte de `patch()` y solo para admin, a propósito.** `PATCH /contacts/:id` exige
+   * `deals:write`, que los agentes tienen: si `privado` entrara por ahí, un agente podría
+   * DESMARCARLO y leer justo las conversaciones que esto oculta. El agujero al revés.
+   *
+   * No corta la ingesta ni borra nada: los mensajes siguen entrando (perder el de un
+   * cliente mal marcado sería peor que enseñar uno privado de más). Solo cambia quién lo ve
+   * — ver `agentScope` en `messaging/conversations.util.ts`.
+   */
+  async setPrivado(tenantId: string, id: string, body: unknown) {
+    const valor = (body as { privado?: unknown })?.privado;
+    if (typeof valor !== 'boolean') {
+      throw new BadRequestException('privado debe ser true o false');
+    }
+    const { count } = await this.prisma.contact.updateMany({
+      where: { id, tenantId },
+      data: { privado: valor },
+    });
+    if (!count) throw new NotFoundException('Contacto no encontrado');
+    return { id, privado: valor };
+  }
+
+  /**
    * Reemplaza el juego de etiquetas del contacto.
    *
    * En una transacción y con los ids validados contra el tenant: sin la validación, un
