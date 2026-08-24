@@ -21,8 +21,12 @@ const USER_SELECT = {
 // Lo que la fila de la agenda necesita para pintarse sin una petición por tarea.
 const TASK_INCLUDE = {
   assignedUser: USER_SELECT,
+  // `null` = la creó el sistema (un cambio de etapa, un flujo), no «no llegó el dato»:
+  // `createdById` es nulable justo para poder decir eso.
+  createdBy: USER_SELECT,
   contact: { select: { id: true, name: true, waId: true, company: true } },
-  deal: { select: { id: true, title: true } },
+  // `amount` es `Decimal` y cruza como string, igual que en la ficha del cliente.
+  deal: { select: { id: true, title: true, amount: true } },
 } as const;
 
 @Injectable()
@@ -53,25 +57,33 @@ export class TasksService {
     const rango = rangoDeScope(scope, new Date(), timezone);
     const alcance = await this.alcance(filtros.equipo, userId, role, roleId);
 
-    const where = buildTaskWhere(tenantId, filtros, alcance);
-    if (rango.desde || rango.hasta) {
-      where.dueAt = { ...(rango.desde ? { gte: rango.desde } : {}), ...(rango.hasta ? { lt: rango.hasta } : {}) };
-    }
-    if (rango.completadas === true) where.completedAt = { not: null };
-    else if (rango.completadas === false) where.completedAt = null;
-
     return this.prisma.task.findMany({
-      where,
+      where: buildTaskWhere(tenantId, filtros, alcance, rango),
       take: TASKS_TAKE,
       // Las atrasadas más viejas primero (son las que más urgen) y dentro del día por hora.
       // `hechas` sale al revés porque ahí interesa lo último que se cerró.
-      orderBy: scope === 'hechas' ? { completedAt: 'desc' } : { dueAt: 'asc' },
+      //
+      // `agenda` lleva las dos clases a la vez, y con el tope de `TASKS_TAKE` el orden decide
+      // qué se pierde. Con `dueAt asc` a secas una tarea cerrada hace tres días vence hace
+      // tres días, así que se cuela DELANTE de las de hoy: en un tenant con historia las 200
+      // filas se las come el pasado y «Hoy» sale vacía — que es el bug por el que este scope
+      // existe. Abiertas primero y cerradas detrás, lo último cerrado arriba: el recorte cae
+      // sobre las cerradas más viejas, que son las que menos duelen.
+      //
+      // `nulls` va explícito y no por el implícito de Postgres para `DESC`: es un default de
+      // motor, y de los que cambian sin que nadie mire.
+      orderBy:
+        scope === 'agenda'
+          ? [{ completedAt: { sort: 'desc', nulls: 'first' } }, { dueAt: 'asc' }]
+          : scope === 'hechas'
+            ? { completedAt: 'desc' }
+            : { dueAt: 'asc' },
       include: TASK_INCLUDE,
     });
   }
 
   /**
-   * Los dos números del menú: atrasadas y de hoy, sin completar.
+   * Los tres números del menú: atrasadas, de hoy sin completar, y cerradas hoy.
    *
    * Endpoint propio y no un conteo sobre la lista: lo pide el menú desde cualquier pantalla, y
    * traerse 200 tareas para contarlas sería tirar de la red por nada.
@@ -82,15 +94,21 @@ export class TasksService {
     const alcance = taskScope(role, userId);
     const atr = rangoDeScope('atrasadas', ahora, timezone);
     const hoy = rangoDeScope('hoy', ahora, timezone);
-    const [atrasadas, deHoy] = await Promise.all([
+    const [atrasadas, deHoy, cerradasHoy] = await Promise.all([
       this.prisma.task.count({
         where: { tenantId, ...alcance, completedAt: null, dueAt: { lt: atr.hasta! } },
       }),
       this.prisma.task.count({
         where: { tenantId, ...alcance, completedAt: null, dueAt: { gte: hoy.desde!, lt: hoy.hasta! } },
       }),
+      // Sin cota superior: una tarea no se cierra en el futuro. Y se cuenta por `completedAt`,
+      // no por `dueAt`: lo cerrado hoy incluye lo que vencía la semana pasada, que es
+      // justamente el trabajo que se quiere ver reconocido al final del día.
+      this.prisma.task.count({
+        where: { tenantId, ...alcance, completedAt: { gte: hoy.desde! } },
+      }),
     ]);
-    return { atrasadas, hoy: deHoy };
+    return { atrasadas, hoy: deHoy, cerradasHoy };
   }
 
   async create(tenantId: string, body: unknown, userId: string, role: string) {
@@ -234,6 +252,38 @@ export class TasksService {
     this.events.emitToTenant(tenantId, 'task:updated', { id: tarea.id, completada: true });
     if (tarea.dealId) this.events.emitToTenant(tenantId, 'deal:updated', { id: tarea.dealId });
     return { ...tarea, dejaTratoHuerfano };
+  }
+
+  /**
+   * Reabrir: deshace el cierre y devuelve la tarea a la agenda.
+   *
+   * **La `Activity{task_done}` del cierre NO se toca.** El timeline es append-only por
+   * declaración (`DDS.md` §4.1) y las métricas comerciales se calculan sobre él
+   * (`activities.rules.ts:8`), así que borrar la fila reescribiría el histórico: que la tarea
+   * se cerró el martes sigue siendo verdad después de reabrirla. Si está abierta AHORA lo dice
+   * la tarea, que es otra pregunta y tiene otro sitio donde contestarse.
+   * ponytail: reabrir y volver a cerrar deja dos `task_done` con el mismo `taskId`. Techo: una
+   * métrica que cuente cierres los contaría dos veces. Camino: `distinct` por `taskId` en esa
+   * consulta — se puede, la columna existe. Hoy no hay ninguna que los cuente así.
+   *
+   * `outcome` sí se limpia: «qué pasó al cerrar» no significa nada sobre una tarea abierta. Y
+   * no se pierde, que es lo que lo hace barato: el texto vive en el `body` de esa `Activity`.
+   */
+  async reopen(tenantId: string, id: string, userId: string, role: string) {
+    const actual = await this.buscar(tenantId, id, userId, role);
+    if (!actual.completedAt) throw new BadRequestException('Esa tarea no estaba completada');
+
+    const tarea = await this.prisma.task.update({
+      where: { id: actual.id },
+      data: { completedAt: null, outcome: null },
+      include: TASK_INCLUDE,
+    });
+    // `deal:updated` porque reabrir APAGA el punto de huérfano de la tarjeta, igual que lo
+    // apaga crear una tarea. No devuelve `dejaTratoHuerfano`: es la operación contraria, y
+    // reabrir nunca deja un trato sin próxima acción.
+    this.events.emitToTenant(tenantId, 'task:updated', { id: tarea.id });
+    if (tarea.dealId) this.events.emitToTenant(tenantId, 'deal:updated', { id: tarea.dealId });
+    return tarea;
   }
 
   // Borrar solo quien la creó, o un admin. Una tarea ajena se reprograma o se reasigna; que

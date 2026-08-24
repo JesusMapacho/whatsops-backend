@@ -64,14 +64,25 @@ export function bucket(
   return 'proxima';
 }
 
-// Los cubos que pide la pantalla, en el orden en que se pintan: lo urgente arriba.
-export const SCOPES = ['atrasadas', 'hoy', 'proximas', 'hechas', 'todas'] as const;
+// Los cubos que pide la pantalla, en el orden en que se pintan: lo urgente arriba. `todas` y
+// `agenda` no son cubos: son listas de las que el cliente reparte los cubos él.
+export const SCOPES = ['atrasadas', 'hoy', 'proximas', 'hechas', 'todas', 'agenda'] as const;
 export type Scope = (typeof SCOPES)[number];
 
 export function parseScope(v: unknown): Scope {
   if (typeof v === 'string' && (SCOPES as readonly string[]).includes(v)) return v as Scope;
   // Por defecto «hoy»: es la pregunta con la que se abre el sistema por la mañana.
   return 'hoy';
+}
+
+/** Lo que un scope decide sobre `dueAt` y `completedAt`. Quien lo aplica es `buildTaskWhere`. */
+export interface RangoScope {
+  desde?: Date;
+  hasta?: Date;
+  /** `null` = no filtrar por completadas, que NO es lo mismo que `false`. */
+  completadas: boolean | null;
+  /** Solo `agenda`: además de las abiertas, entran las cerradas a partir de este instante. */
+  cerradasDesde?: Date;
 }
 
 /**
@@ -86,7 +97,7 @@ export function rangoDeScope(
   scope: Scope,
   ahora: Date,
   timezone?: string | null,
-): { desde?: Date; hasta?: Date; completadas: boolean | null } {
+): RangoScope {
   const inicioDeHoy = inicioDelDia(ahora, timezone);
   // El inicio de mañana NO es "hoy + 24 h": el día del cambio de horario de verano dura 23 o
   // 25 horas, así que sumar 24 desvía el corte una hora y mueve de cubo las tareas del borde
@@ -105,10 +116,27 @@ export function rangoDeScope(
       return { desde: inicioDeManana, completadas: false };
     case 'hechas':
       return { completadas: true };
+    case 'agenda':
+      // La pantalla pinta los cuatro cubos de una sola lista, así que no hay límites de
+      // `dueAt`. Lo único acotado son las cerradas: sin eso el histórico se come el tope de
+      // la consulta y la agenda de hoy no cabe.
+      return { completadas: null, cerradasDesde: haceSieteDias(inicioDeHoy, timezone) };
     default:
       // `null` = no filtrar por completadas, que no es lo mismo que `false`.
       return { completadas: null };
   }
+}
+
+/**
+ * Medianoche, en la zona del tenant, del día de hace siete.
+ *
+ * Retrocede **re-anclando**, no restando `7 × 24 h`: el día del cambio de horario de verano
+ * dura 23 o 25 horas, así que una semana fija desvía el corte una hora. Se retrocede a media
+ * mañana del día −7 —que cae dentro de ese día con cualquier transición— y se le vuelve a
+ * pedir su medianoche. Es el mismo truco que el `+36 h` de aquí arriba, hacia atrás.
+ */
+function haceSieteDias(inicioDeHoy: Date, timezone?: string | null): Date {
+  return inicioDelDia(new Date(inicioDeHoy.getTime() - (7 * 24 - 12) * 60 * 60 * 1000), timezone);
 }
 
 /**

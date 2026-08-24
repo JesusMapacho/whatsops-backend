@@ -3,6 +3,11 @@
 // GEMELO de frontend/src/app/tareas/tareas.buckets.check.ts: los mismos casos límite en
 // los dos lados, porque el criterio está duplicado a propósito. Si cambias uno, cambia
 // el otro o dejarán de contar lo mismo.
+//
+// Lo gemelo es el CLASIFICADOR: `bucket` y `diaEn`. `SCOPES`, `parseScope`, `rangoDeScope`,
+// `inicioDelDia` y `componerDueAt` solo existen de este lado —el frontend reordena una lista
+// que ya le llega repartida— así que tocarlos no obliga a tocar el otro archivo. Comprobado
+// al añadir `agenda`; se deja escrito para que no haya que volver a comprobarlo.
 import * as assert from 'node:assert';
 import { bucket, diaEn, inicioDelDia, parseScope, rangoDeScope } from './tasks.buckets';
 
@@ -55,6 +60,7 @@ assert.strictEqual(parseScope('todas'), 'todas');
 assert.strictEqual(parseScope('basura'), 'hoy');
 assert.strictEqual(parseScope(undefined), 'hoy');
 assert.strictEqual(parseScope(42), 'hoy');
+assert.strictEqual(parseScope('agenda'), 'agenda');
 
 // --- inicioDelDia ---------------------------------------------------------------------
 // Medianoche del 12 de agosto en México = 06:00 UTC del 12.
@@ -92,6 +98,20 @@ assert.strictEqual(atr.completadas, false);
 assert.strictEqual(rangoDeScope('todas', AHORA, MX).completadas, null);
 assert.strictEqual(rangoDeScope('hechas', AHORA, MX).completadas, true);
 
+// «agenda» es la lista de la pantalla nueva: los cuatro cubos de una sola consulta. No acota
+// `dueAt` —si lo hiciera faltaría uno de los cubos— y no filtra por completadas: deja pasar
+// las abiertas Y las cerradas desde `cerradasDesde`.
+const agenda = rangoDeScope('agenda', AHORA, MX);
+assert.strictEqual(agenda.desde, undefined, 'agenda no acota dueAt por abajo');
+assert.strictEqual(agenda.hasta, undefined, 'agenda no acota dueAt por arriba');
+assert.strictEqual(agenda.completadas, null, 'ni solo abiertas ni solo cerradas');
+// Medianoche del día de hace siete EN LA ZONA DEL TENANT: hoy es el 12 en México, así que el
+// corte es la medianoche del 5, no «ahora menos 168 h» (que caería a las 20:00 del 5).
+assert.strictEqual(agenda.cerradasDesde!.toISOString(), '2026-08-05T06:00:00.000Z');
+// Y ningún otro scope lo trae: es lo que distingue `agenda` de `todas`.
+assert.strictEqual(rangoDeScope('todas', AHORA, MX).cerradasDesde, undefined);
+assert.strictEqual(rangoDeScope('hechas', AHORA, MX).cerradasDesde, undefined);
+
 // --- el día del cambio de horario de verano ------------------------------------------
 // El día de la transición dura 23 o 25 horas, así que "hoy + 24 h" desvía el corte una hora
 // y se lleva de cubo las tareas del borde. Madrid adelanta el último domingo de marzo
@@ -123,6 +143,33 @@ assert.strictEqual(
   rangoDeScope('proximas', new Date('2026-03-29T10:00:00Z'), MADRID).desde!.toISOString(),
   marzo.hasta!.toISOString(),
 );
+// La ventana de siete días de `agenda` también se re-ancla, y por el mismo motivo: siete días
+// que cruzan una transición NO miden 168 h. Restando `7 × 24 h` el corte se iría una hora y
+// dejaría de ser una medianoche, que es lo único que hace comparable «cerrada hace 7 días»
+// entre dos semanas del año.
+const semanaMarzo = rangoDeScope('agenda', new Date('2026-04-02T10:00:00Z'), MADRID);
+assert.strictEqual(
+  semanaMarzo.cerradasDesde!.toISOString(),
+  '2026-03-25T23:00:00.000Z',
+  'medianoche del 26 de marzo en Madrid (CET), no las 22:00Z que daría restar 168 h',
+);
+assert.strictEqual(
+  (rangoDeScope('hoy', new Date('2026-04-02T10:00:00Z'), MADRID).desde!.getTime() -
+    semanaMarzo.cerradasDesde!.getTime()) /
+    3_600_000,
+  167,
+  'la semana que cruza el cambio de marzo mide 167 h, no 168',
+);
+
+const semanaOctubre = rangoDeScope('agenda', new Date('2026-10-29T10:00:00Z'), MADRID);
+assert.strictEqual(
+  (rangoDeScope('hoy', new Date('2026-10-29T10:00:00Z'), MADRID).desde!.getTime() -
+    semanaOctubre.cerradasDesde!.getTime()) /
+    3_600_000,
+  169,
+  'la de octubre mide 169 h',
+);
+
 // Una tarea a las 23:30 del día que dura 23 h sigue siendo de HOY.
 assert.strictEqual(
   bucket(tarea('2026-03-29T21:30:00Z'), new Date('2026-03-29T10:00:00Z'), MADRID),

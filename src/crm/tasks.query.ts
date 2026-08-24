@@ -1,5 +1,5 @@
 import { Prisma, TaskType } from '@prisma/client';
-import { componerDueAt } from './tasks.buckets';
+import { RangoScope, componerDueAt } from './tasks.buckets';
 
 // Tope de la lista, con el mismo criterio que `INBOX_TAKE` y `DEALS_TAKE`.
 // ponytail: sin paginación. Una agenda con más de 200 tareas pendientes ya no se lee; el
@@ -115,8 +115,11 @@ export function parseTaskFilters(query: Record<string, unknown>): TaskFilters {
 }
 
 /**
- * Where de la lista. El rango de `dueAt` y el filtro de completadas los pone el llamador
- * desde `rangoDeScope`; aquí van el tenant, el alcance y los filtros de la pantalla.
+ * Where de la lista: el tenant, el alcance, los filtros de la pantalla y el rango del scope.
+ *
+ * El rango entra AQUÍ y no en el servicio a propósito. Antes se pegaba después
+ * (`where.dueAt = …`), y con eso el check solo podía afirmar media consulta; el `OR` de
+ * `agenda` es justo la clase de condición que no se puede dejar fuera de lo que se comprueba.
  *
  * **Los filtros van en `AND`, nunca asignados sobre el where.** El alcance llega por spread,
  * y para un agente es `{ assignedUserId: <él> }`: asignar `where.assignedUserId` con el valor
@@ -131,6 +134,7 @@ export function buildTaskWhere(
   tenantId: string,
   f: TaskFilters,
   alcance: Prisma.TaskWhereInput,
+  rango?: RangoScope,
 ): Prisma.TaskWhereInput {
   const where: Prisma.TaskWhereInput = { tenantId, ...alcance };
   const extra: Prisma.TaskWhereInput[] = [];
@@ -138,6 +142,24 @@ export function buildTaskWhere(
   if (f.dealId) extra.push({ dealId: f.dealId });
   if (f.contactId) extra.push({ contactId: f.contactId });
   if (f.type) extra.push({ type: f.type });
+
+  if (rango?.desde || rango?.hasta) {
+    extra.push({
+      dueAt: {
+        ...(rango.desde ? { gte: rango.desde } : {}),
+        ...(rango.hasta ? { lt: rango.hasta } : {}),
+      },
+    });
+  }
+  if (rango?.completadas === true) extra.push({ completedAt: { not: null } });
+  else if (rango?.completadas === false) extra.push({ completedAt: null });
+  else if (rango?.cerradasDesde) {
+    // Abierta, O cerrada hace poco. Es la única condición de esta lista que es un `OR`, y por
+    // eso se SUMA al `AND` como todo lo demás: un `where.OR = […]` pisaría el `OR` que
+    // trajera el alcance el día que lo traiga, que es el fallo de la familia otra vez.
+    extra.push({ OR: [{ completedAt: null }, { completedAt: { gte: rango.cerradasDesde } }] });
+  }
+
   if (extra.length) where.AND = extra;
   return where;
 }

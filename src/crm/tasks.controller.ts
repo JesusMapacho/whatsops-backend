@@ -44,6 +44,14 @@ export class TasksController {
     return this.tasks.complete(user.tenantId, id, body, user.userId, user.role);
   }
 
+  // Reabrir una cerrada. Ruta propia por el mismo motivo que `complete`: `PATCH` no acepta
+  // `completedAt`, y no debe — el estado de cierre no lo pone el cliente.
+  @Post(':id/reopen')
+  @RequirePermissions('tasks:write')
+  reopen(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.tasks.reopen(user.tenantId, id, user.userId, user.role);
+  }
+
   @Delete(':id')
   @RequirePermissions('tasks:write')
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {

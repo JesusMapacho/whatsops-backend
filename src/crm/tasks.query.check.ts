@@ -1,6 +1,6 @@
 // Check del alta y edición de tareas. Correr: npx ts-node src/crm/tasks.query.check.ts
 import * as assert from 'node:assert';
-import { componerDueAt } from './tasks.buckets';
+import { Scope, componerDueAt, rangoDeScope } from './tasks.buckets';
 import {
   TaskError,
   buildTaskWhere,
@@ -169,5 +169,74 @@ assert.strictEqual(conFiltros.assignedUserId, 'u1', 'el alcance sigue ahí');
 assert.deepStrictEqual(conFiltros.AND, [{ dealId: 'd1' }, { type: 'call' }]);
 // Sin filtros no se añade un AND vacío, que Prisma trataría como una condición más.
 assert.strictEqual(buildTaskWhere('t1', parseTaskFilters({}), alcanceAgente).AND, undefined);
+
+// --- buildTaskWhere + el rango del scope ----------------------------------------------
+// El rango entra por `buildTaskWhere` desde que `agenda` necesita un `OR`. Lo que se afirma
+// aquí es el where FINAL —lo que Postgres va a recibir—, no media consulta: antes el rango se
+// pegaba en el servicio y el check no lo veía.
+const AHORA = new Date('2026-08-12T20:00:00Z'); // el 12 en México
+const INICIO_HOY = new Date('2026-08-12T06:00:00.000Z');
+const INICIO_MANANA = new Date('2026-08-13T06:00:00.000Z');
+const HACE_SIETE = new Date('2026-08-05T06:00:00.000Z');
+const rango = (s: Scope) => rangoDeScope(s, AHORA, MX);
+
+// El rango se SUMA al AND; no se asigna en la raíz del where.
+const wHoy = buildTaskWhere('t1', parseTaskFilters({}), alcanceAgente, rango('hoy')) as any;
+assert.strictEqual(wHoy.tenantId, 't1');
+assert.strictEqual(wHoy.assignedUserId, 'u1');
+assert.strictEqual(wHoy.dueAt, undefined, 'el rango no se asigna en la raíz');
+assert.strictEqual(wHoy.completedAt, undefined);
+assert.deepStrictEqual(wHoy.AND, [
+  { dueAt: { gte: INICIO_HOY, lt: INICIO_MANANA } },
+  { completedAt: null },
+]);
+
+// Atrasadas acota solo por arriba; el `gte` no debe aparecer vacío.
+assert.deepStrictEqual((buildTaskWhere('t1', parseTaskFilters({}), {}, rango('atrasadas')) as any).AND, [
+  { dueAt: { lt: INICIO_HOY } },
+  { completedAt: null },
+]);
+// Próximas, solo por abajo.
+assert.deepStrictEqual((buildTaskWhere('t1', parseTaskFilters({}), {}, rango('proximas')) as any).AND, [
+  { dueAt: { gte: INICIO_MANANA } },
+  { completedAt: null },
+]);
+// Hechas: sin límites de `dueAt`, y cerradas de cualquier fecha.
+assert.deepStrictEqual((buildTaskWhere('t1', parseTaskFilters({}), {}, rango('hechas')) as any).AND, [
+  { completedAt: { not: null } },
+]);
+// «todas» no filtra por completadas: `null` NO es `false`, así que no se suma nada y no se
+// emite un AND vacío, que Prisma trataría como una condición más.
+assert.strictEqual(buildTaskWhere('t1', parseTaskFilters({}), {}, rango('todas')).AND, undefined);
+
+// «agenda»: abiertas O cerradas hace poco, en UN SOLO `OR` y DENTRO del AND.
+const wAgenda = buildTaskWhere('t1', parseTaskFilters({}), {}, rango('agenda')) as any;
+assert.strictEqual(wAgenda.dueAt, undefined, 'agenda no acota dueAt: pinta los cuatro cubos');
+assert.strictEqual(wAgenda.completedAt, undefined);
+assert.strictEqual(wAgenda.OR, undefined, 'el OR va DENTRO del AND, nunca en la raíz');
+assert.deepStrictEqual(wAgenda.AND, [
+  { OR: [{ completedAt: null }, { completedAt: { gte: HACE_SIETE } }] },
+]);
+
+// EL CASO QUE IMPORTA, ahora con el rango dentro: `agenda` + `?assignedUserId=<otro>` con
+// alcance de agente. Si el `OR` se hubiera asignado en la raíz —o el filtro sobre la clave del
+// alcance— es aquí donde se vería, y es el agujero que esta familia ya abrió dos veces.
+const agendaAjena = buildTaskWhere(
+  't1',
+  parseTaskFilters({ assignedUserId: 'u2', type: 'call' }),
+  alcanceAgente,
+  rango('agenda'),
+) as any;
+assert.strictEqual(agendaAjena.tenantId, 't1');
+assert.strictEqual(agendaAjena.assignedUserId, 'u1', 'el alcance del agente SOBREVIVE al rango');
+assert.deepStrictEqual(
+  agendaAjena.AND,
+  [
+    { assignedUserId: 'u2' },
+    { type: 'call' },
+    { OR: [{ completedAt: null }, { completedAt: { gte: HACE_SIETE } }] },
+  ],
+  'el filtro pedido y el OR del scope CONVIVEN, ninguno pisa al otro',
+);
 
 console.log('crm/tasks.query.check OK');
