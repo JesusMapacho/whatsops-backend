@@ -63,6 +63,19 @@ export class AutomationsController {
     return this.automations.create(user.tenantId, body, user.userId);
   }
 
+  // Los numeros de la lista: sparkline, estados y ultima ejecucion por flujo.
+  //
+  // ANTES de `automations/:id`, o esa ruta se traga `metrics` y el servicio busca una
+  // automatizacion con ese id.
+  //
+  // Endpoint aparte y no un campo mas en `GET /automations`: la lista tiene que pintarse
+  // aunque esto falle. El argumento entero, en `contrato/45`.
+  @Get('automations/metrics')
+  @RequirePermissions('automations:manage')
+  metricas(@CurrentUser() user: AuthUser, @Query('dias') dias?: string) {
+    return this.automations.metricas(user.tenantId, dias);
+  }
+
   @Get('automations/:id')
   @RequirePermissions('automations:manage')
   get(@CurrentUser() user: AuthUser, @Param('id') id: string) {

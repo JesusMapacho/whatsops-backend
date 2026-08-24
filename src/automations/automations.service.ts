@@ -5,6 +5,7 @@
 // El interruptor es la frontera, no el editor.
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
+import { Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { catalogoPublico, nodeType, validarConfig, validarTrigger } from './catalog';
@@ -14,6 +15,7 @@ import { NOMBRE_VAR } from './contexto';
 import { catalogoDeFunciones, problemasDeFunciones } from './expresiones';
 import { AUTOMATION_QUEUE } from './automations.queue';
 import { nuevoTokenDeHook, urlDelHook } from './hooks';
+import { armar, FilaCubo, parseDias, ventana, zonaValida } from './metricas';
 
 const AUTOMATION_INCLUDE = {
   nodes: { orderBy: { createdAt: 'asc' } },
@@ -410,6 +412,85 @@ export class AutomationsService {
     if (!run) throw new BadRequestException('Ya hay una ejecución en curso para esa conversación.');
     await this.cola.add('run', { runId: run.id });
     return run;
+  }
+
+  // --- metricas -------------------------------------------------------------------------
+
+  /**
+   * Los numeros de la lista: el sparkline de N dias, los estados terminales y cuando corrio
+   * cada flujo por ultima vez.
+   *
+   * Endpoint aparte y NO un campo mas en `list()`, que es lo que pidio el frontend y esta
+   * argumentado en `contrato/45 § Lo que NO cruza la frontera`: la pantalla tiene que pintarse
+   * aunque las metricas fallen. Metido en `GET /automations`, un agregado lento o roto se
+   * lleva por delante la lista entera.
+   *
+   * Tres consultas y no una: la lista de flujos hace falta aparte porque uno que nunca corrio
+   * no aparece en ninguna de las otras dos y tiene que salir igual, con la serie a ceros.
+   */
+  async metricas(tenantId: string, diasRaw?: unknown) {
+    const dias = parseDias(diasRaw);
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { timezone: true },
+    });
+    // Una sola zona para los dos lados del calculo: la que corta los cubos en Postgres y la
+    // que genera las claves aqui. Ver `zonaValida`.
+    const tz = zonaValida(tenant?.timezone);
+    const { claves, desde } = ventana(new Date(), dias, tz);
+
+    const [flujos, cubos, ultimas] = await Promise.all([
+      this.prisma.automation.findMany({
+        where: { tenantId },
+        select: { id: true },
+        orderBy: { updatedAt: 'desc' }, // el mismo orden que `list()`, para que casen a simple vista
+      }),
+      // Los cubos, agregados EN POSTGRES. Raw SQL y no `groupBy` de Prisma —al reves que
+      // `KpisService`— porque Prisma no sabe agrupar por un dia derivado, y traerse los runs a
+      // memoria para cubearlos en JS no tiene tope. El motivo por el que `kpis.service.ts` huyo
+      // del SQL crudo era componer un alcance con `OR`; aqui el alcance es un `"tenantId" = $1`
+      // literal y no hay nada que pisar. Ademas el resultado esta acotado: flujos x dias x
+      // estados, y no una fila por ejecucion.
+      //
+      // El `AT TIME ZONE 'UTC'` de en medio NO sobra: `createdAt` es `TIMESTAMP(3)` SIN zona y
+      // guarda UTC, asi que sin ese primer paso Postgres interpretaria el valor como hora local
+      // del servidor y el corte del dia se iria entero.
+      this.prisma.$queryRaw<{ automationId: string; dia: string; status: string; n: bigint }[]>(
+        Prisma.sql`
+          SELECT "automationId",
+                 (("createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${tz})::date::text AS dia,
+                 "status"::text AS status,
+                 count(*)::bigint AS n
+          FROM "AutomationRun"
+          WHERE "tenantId" = ${tenantId} AND "createdAt" >= ${desde}
+          GROUP BY 1, 2, 3
+        `,
+      ),
+      // SIN filtro de fecha, a proposito: la pregunta que contesta es «cuando corrio por ultima
+      // vez», asi que `null` tiene que querer decir «nunca», no «no en estos siete dias».
+      //
+      // ponytail: `AutomationRun` no tiene indice por `createdAt` (solo `(tenantId, status)` y
+      // `(automationId)`), asi que esto recorre los runs del tenant. Techo: un tenant con
+      // cientos de miles de ejecuciones. Camino: `@@index([tenantId, createdAt])`.
+      this.prisma.automationRun.groupBy({
+        by: ['automationId'],
+        where: { tenantId },
+        _max: { createdAt: true },
+      }),
+    ]);
+
+    return {
+      dias,
+      desde: claves[0],
+      flujos: armar(
+        flujos.map((a) => a.id),
+        cubos.map((c): FilaCubo => ({ ...c, n: Number(c.n) })), // bigint no serializa a JSON
+        claves,
+        new Map(
+          ultimas.flatMap((u) => (u._max.createdAt ? [[u.automationId, u._max.createdAt]] : [])),
+        ),
+      ),
+    };
   }
 
   // --- cron ---------------------------------------------------------------------------
