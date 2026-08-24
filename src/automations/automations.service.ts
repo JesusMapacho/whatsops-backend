@@ -101,8 +101,13 @@ export class AutomationsService {
 
   /**
    * Fuera el token crudo, dentro la URL ya armada. Sin este mapeo, `hookToken` viajaría al
-   * navegador en cada listado por el simple hecho de existir la columna — estos dos métodos
-   * devolvían la fila de Prisma entera.
+   * navegador por el simple hecho de existir la columna — estos métodos devolvían la fila de
+   * Prisma entera.
+   *
+   * Pasa por aquí TODO lo que devuelva una `Automation`, no solo las lecturas: durante un
+   * tiempo `create`, `patch`, `guardarGrafo` y `setStatus` devolvieron la fila cruda, así que
+   * el token acababa en la memoria del navegador sin que nadie lo hubiera pedido. Un método
+   * nuevo que devuelva una automatización y no llame aquí reabre esa fuga.
    */
   private sinToken<T extends { hookToken?: string | null }>(a: T) {
     const { hookToken, ...resto } = a;
@@ -149,7 +154,7 @@ export class AutomationsService {
     const src = (body ?? {}) as Record<string, unknown>;
     const name = typeof src.name === 'string' ? src.name.trim() : '';
     if (!name) throw new BadRequestException('Campo requerido: name');
-    return this.prisma.automation.create({
+    const creada = await this.prisma.automation.create({
       data: {
         tenantId,
         name,
@@ -163,6 +168,7 @@ export class AutomationsService {
       },
       include: AUTOMATION_INCLUDE,
     });
+    return this.sinToken(creada);
   }
 
   /**
@@ -192,11 +198,12 @@ export class AutomationsService {
     }
     if (!Object.keys(data).length) return a;
 
-    return this.prisma.automation.update({
+    const renombrada = await this.prisma.automation.update({
       where: { id: a.id },
       data,
       include: AUTOMATION_INCLUDE,
     });
+    return this.sinToken(renombrada);
   }
 
   /**
@@ -271,7 +278,11 @@ export class AutomationsService {
         await tx.automation.update({ where: { id: automation.id }, data: { status: 'draft' } });
       }
 
-      return tx.automation.findFirst({ where: { id: automation.id }, include: AUTOMATION_INCLUDE });
+      const guardada = await tx.automation.findFirst({
+        where: { id: automation.id },
+        include: AUTOMATION_INCLUDE,
+      });
+      return guardada ? this.sinToken(guardada) : null;
     });
   }
 
@@ -280,11 +291,12 @@ export class AutomationsService {
     const a = await this.get(tenantId, id);
     if (!activar) {
       await this.quitarCron(a.id);
-      return this.prisma.automation.update({
+      const apagada = await this.prisma.automation.update({
         where: { id: a.id },
         data: { status: 'draft' },
         include: AUTOMATION_INCLUDE,
       });
+      return this.sinToken(apagada);
     }
 
     // Las funciones inexistentes se dicen AQUÍ y no en ejecución: un filtro mal escrito es un
@@ -302,7 +314,7 @@ export class AutomationsService {
       include: AUTOMATION_INCLUDE,
     });
     await this.sincronizarCron(actualizada.id, actualizada.trigger);
-    return actualizada;
+    return this.sinToken(actualizada);
   }
 
   async remove(tenantId: string, id: string) {
