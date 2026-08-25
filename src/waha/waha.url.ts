@@ -196,6 +196,47 @@ export async function assertSafeFetchUrl(
   return { withKey: false };
 }
 
+/**
+ * Guarda anti-SSRF para una URL de salida cualquiera, sin `baseUrl` de por medio: la usa el
+ * sondeo de APIs de la feature 47, donde la URL la teclea un admin y el backend **devuelve el
+ * cuerpo al llamante**, que es la misma forma que hace peligroso el `/qr` de arriba.
+ *
+ * Vive en este archivo y no en `automations/` a propósito: la lista de rangos privados ya está
+ * aquí, y un tercer sitio con la misma lista es cómo se acaba con dos definiciones de
+ * «privado» — la que se actualiza y la que no.
+ *
+ * Hereda el techo de TOCTOU que `assertSafeBaseUrl` ya nombra: entre resolver y llamar, el
+ * nombre puede re-resolver a una privada. No se vuelve a argumentar aquí; reargumentarlo
+ * invitaría a creer que se resolvió.
+ *
+ * NO cubre las redirecciones: un 302 hacia 169.254.169.254 se salta todo esto. Quien llame
+ * tiene que pedir `redirect: 'manual'` — está en el check.
+ *
+ * Se valida el host **que sale del parseo**, no el texto que llegó, y eso no es un detalle: un
+ * valor interpolado dentro de la URL puede llevar una `@` y correr el host entero
+ * (`https://algo@otro.com/` tiene host `otro.com`). Comparar contra la cadena original
+ * validaría un host que el `fetch` no va a usar. Por eso `catalog.ts` pide además no meter
+ * variables en el dominio: aquí se está a salvo, pero allí se está adivinando a quién se llama.
+ */
+export async function assertSafeOutboundUrl(raw: string): Promise<URL> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error('La URL no es válida.');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('Solo se puede llamar por http:// o https://.');
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  const ips = isIP(host) ? [host] : await resolveAll(host);
+  if (!ips.length) throw new Error(`No se pudo resolver el host «${host}».`);
+  if (ips.some(isPrivateIp)) {
+    throw new Error('Esa URL apunta a una dirección interna o reservada.');
+  }
+  return u;
+}
+
 async function resolveAll(host: string): Promise<string[]> {
   try {
     const res = await lookup(host, { all: true });

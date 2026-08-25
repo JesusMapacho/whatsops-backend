@@ -162,23 +162,43 @@ que va con enmienda.
 
 ## Verificación
 
-1. `npx ts-node src/automations/<lo que salga>.check.ts` — el aplanado es puro y se prueba sin
-   red: objeto anidado, lista, `null`, valor escalar en la raíz, y el tope con `truncado`.
-2. `npm run check` entero y `npm run build`.
-3. Con la base levantada y una API pública de prueba, `POST /automations/:id/sondear` devuelve
-   las rutas reales **completas**, y una URL con `{{contacto.waId}}` se resuelve antes de llamar.
-   Sin `guardarComo` → 400 accionable. Un array de 200 elementos → **una** ruta con `deLista`.
-   Un `account-balance` → `alcanzable: false`. Un 401 con HTML → `estado: 401` y `cuerpo`.
-4. **SSRF**: `http://127.0.0.1:3000/health`, `http://169.254.169.254/`, `http://[::1]/` y un
-   host cuyo DNS resuelva a una privada → rechazados los cuatro. Y una URL pública que
-   **redirige** a una privada → rechazada también.
-5. Un `http.request` con `campos: [{ nombre: 'saldo', ruta: 'json.data.0.saldo' }]`, simulado
-   en seco con `httpRespuestas`, deja `{{vars.saldo}}` resuelto en el nodo siguiente. **Esa es
-   la prueba de que la costura elegida es la correcta**: si hubiera que tocar el processor para
-   que funcione en seco, está en el sitio equivocado.
-6. `respuesta` metida tal cual en `httpRespuestas[nodeId]` de `/simular` reproduce el mismo
-   recorrido que el sondeo, sin volver a llamar a la API. Se sondea una vez y se simula veinte.
-7. Con dos tenants, no se puede sondear desde la automatización del otro.
+1. `npx ts-node src/automations/sondeo.check.ts` → `sondeo.check.ts OK`. Y
+   `contexto.check.ts`, que es donde se afirma `campos`: es el único sitio donde la salida de
+   un nodo se convierte en variables, y lo comparten el motor y la simulación.
+2. `npm run check` → 58/58. `npm run build` limpio.
+3. Con la base levantada, cargar el fixture:
+
+   ```bash
+   docker exec -i whatsops-backend-postgres-1 psql -U whatsops -d whatsops      -f - < prisma/sql/seed-47-sondeo.sql
+   ```
+
+   Deja `[seed47] Sondeo y campos con nombre` en borrador: trigger → `http.request` con
+   `campos` → un envío que dice `Tu saldo es {{vars.saldo}}, {{vars.quien}}.` **Ese texto es
+   la feature**: el nodo de después no menciona la forma de la API. Va aparte del seed de la
+   42 a propósito — aquel está citado textualmente en su verificación, y meterle un nodo más
+   invalidaría esas frases.
+
+4. Sobre `seed47-auto` (verificado el 2026-08-25, 12 de 12):
+   - Sin `guardarComo` → 400: «Ponle nombre al resultado antes de sondear».
+   - **SSRF, las cinco**: `http://127.0.0.1:3000/health`, `http://169.254.169.254/…`,
+     `http://[::1]/`, `http://10.0.0.1/` y `file:///etc/passwd` → las cinco con `estado: 0`,
+     `rutas: []` y motivo. Las cuatro primeras dicen «apunta a una dirección interna o
+     reservada»; la quinta, «solo http:// o https://».
+   - Un host que no resuelve → `estado: 0` con el motivo nombrando el host, **no un 500**.
+   - La URL se interpola **antes** de validar y llamar: la plantilla ya no aparece en el error.
+   - **`campos` en seco** (contrato §8): simular con
+     `httpRespuestas: { 'seed47-n1': { data: [{ saldo: 1234 }], cliente: { nombre: 'Leticia' } } }`
+     deja el último paso en `Tu saldo es 1234, Leticia.` **Esa es la prueba de que la costura
+     está bien elegida**: no hubo que tocar el processor para que funcione en seco.
+   - Y `vars.api.json` sigue entero: `campos` **añade** nombres, no los sustituye.
+   - El sondeo no crea ninguna fila, contadas antes y después.
+   - Con el `tenantId` de otro tenant → 404.
+
+5. **Lo que NO se pudo verificar aquí y queda dicho**: una llamada que llegue a contestar.
+   Todas las pruebas de arriba fallan antes del `fetch` —a propósito, para no depender de una
+   API ajena—, así que el camino feliz (rutas reales, `truncado`, `respuesta`) está cubierto
+   por `sondeo.check.ts` sobre objetos, no contra una API de verdad. La primera pasada con
+   red debe mirar eso, más el 302 (que no se sigue) y un 401 con cuerpo HTML.
 
 ## El orden de despliegue, que no es el habitual
 

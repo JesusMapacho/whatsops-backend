@@ -8,11 +8,13 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Prisma } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
-import { catalogoPublico, nodeType, validarConfig, validarTrigger } from './catalog';
+import { catalogoPublico, interpolarConfig, nodeType, validarConfig, validarTrigger } from './catalog';
 import { problemasDelGrafo } from './graph';
 import { patronCron } from './triggers';
 import { NOMBRE_VAR, contextoDeMensaje } from './contexto';
 import { entradaSegunTrigger, simular } from './simulacion';
+import { aplanarRespuesta } from './sondeo';
+import { assertSafeOutboundUrl } from '../waha/waha.url';
 import { channelAdapter } from '../messaging/channels';
 import { isWithinWindow } from '../messaging/messaging.util';
 import { catalogoDeFunciones, problemasDeFunciones } from './expresiones';
@@ -431,9 +433,19 @@ export class AutomationsService {
    * que es justo el problema. Tampoco valida el grafo con `problemasDelGrafo`: a medio dibujar
    * esta roto por definicion, y probar el trozo que ya existe es para lo que se simula.
    */
-  async simularFlujo(tenantId: string, id: string, body: unknown) {
-    const a = await this.get(tenantId, id);
-    const src = (body ?? {}) as Record<string, unknown>;
+  /**
+   * El contexto con el que se prueba una automatizacion: lo comparten la simulacion en seco
+   * (42) y el sondeo de APIs (47).
+   *
+   * Vive en un metodo y no copiado en los dos porque el contrato de las dos features dice lo
+   * mismo: «no se inventa una tercera forma de armar contexto». Dos copias son dos formas en
+   * cuanto alguien toca una.
+   */
+  private async contextoDePrueba(
+    tenantId: string,
+    a: { trigger: unknown },
+    src: Record<string, unknown>,
+  ): Promise<{ contexto: Record<string, unknown>; conversationId: string | null; tipoTrigger: string }> {
     // La clave es `type`, no `tipo` (`validarTrigger`, catalog.ts:753). Con la equivocada esto
     // caia siempre al 'manual' y la simulacion de una palabra clave decia que la habia
     // disparado otra cosa.
@@ -489,6 +501,14 @@ export class AutomationsService {
       });
     }
 
+    return { contexto, conversationId, tipoTrigger };
+  }
+
+  async simularFlujo(tenantId: string, id: string, body: unknown) {
+    const a = await this.get(tenantId, id);
+    const src = (body ?? {}) as Record<string, unknown>;
+    const { contexto, conversationId } = await this.contextoDePrueba(tenantId, a, src);
+
     const [variables, conv] = await Promise.all([
       this.prisma.tenantVariable.findMany({ where: { tenantId }, select: { name: true, value: true } }),
       conversationId
@@ -530,6 +550,122 @@ export class AutomationsService {
       permitirHttpReal: src.permitirHttpReal === true,
       frenoEnvio,
     });
+  }
+
+  // --- sondeo de APIs (feature 47) --------------------------------------------------------
+
+  /** Lo que se lee del cuerpo. Un sondeo es para reconocer la forma, no para traerse el dato. */
+  private static readonly TOPE_CUERPO = 64 * 1024;
+  private static readonly TIMEOUT_SONDEO_MS = 10_000;
+
+  /**
+   * Llama a la API del nodo UNA vez y devuelve la forma de lo que contesto.
+   *
+   * Existe porque configurar un «Llamar a una API» es hoy a ciegas: se teclea
+   * `{{vars.api.json...}}` adivinando, se activa, y se descubre si acertaste cuando escribe un
+   * cliente. Las rutas que salen de aqui alimentan el autocompletado que ya existe.
+   *
+   * NO crea ninguna fila y no guarda el resultado: se sondea, se eligen campos, se guarda el
+   * nodo. Nada que persistir y nada que invalidar.
+   */
+  async sondear(tenantId: string, id: string, body: unknown) {
+    const a = await this.get(tenantId, id);
+    const src = (body ?? {}) as Record<string, unknown>;
+    const configCruda = (src.config ?? {}) as Record<string, unknown>;
+
+    const guardarComo = typeof configCruda.guardarComo === 'string' ? configCruda.guardarComo.trim() : '';
+    if (!guardarComo) {
+      // Las rutas van COMPLETAS para que el cliente no concatene el prefijo, y el prefijo sale
+      // de aqui. Sin nombre no hay ruta que devolver, y media docena de rutas que no resuelven
+      // es peor respuesta que un error que dice que hacer.
+      throw new BadRequestException('Ponle nombre al resultado («Guardar el resultado como») antes de sondear.');
+    }
+
+    const tipoHttp = nodeType('http.request');
+    if (!tipoHttp) throw new BadRequestException('El nodo de llamada a API no esta en el catalogo.');
+
+    const { contexto } = await this.contextoDePrueba(tenantId, a, src);
+    const variables = await this.prisma.tenantVariable.findMany({
+      where: { tenantId },
+      select: { name: true, value: true },
+    });
+    // Mismo interpolador que el motor, para que la URL que se llama aqui sea EXACTAMENTE la que
+    // se llamaria en produccion. Si se resolviera de otra forma, el sondeo probaria otra API.
+    const config = interpolarConfig(tipoHttp, configCruda, {
+      ...contexto,
+      ajustes: Object.fromEntries(variables.map((v) => [v.name, v.value])),
+    });
+
+    const prefijo = `vars.${guardarComo}.json`;
+    const metodo = config.metodo === 'POST' ? 'POST' : 'GET';
+    const fallo = (error: string) => ({ estado: 0, ok: false, rutas: [], error });
+
+    let url: URL;
+    try {
+      url = await assertSafeOutboundUrl(String(config.url ?? ''));
+    } catch (e) {
+      return fallo((e as Error).message);
+    }
+
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), AutomationsService.TIMEOUT_SONDEO_MS);
+    try {
+      const res = await fetch(url, {
+        method: metodo,
+        signal: ac.signal,
+        // Sin seguir redirecciones: un 302 hacia 169.254.169.254 se salta entera la validacion
+        // de arriba, y es el clasico.
+        redirect: 'manual',
+        ...(metodo === 'POST'
+          ? { headers: { 'Content-Type': 'application/json' }, body: String(config.cuerpo ?? '') || '{}' }
+          : {}),
+      });
+
+      if (res.status >= 300 && res.status < 400) {
+        return {
+          estado: res.status,
+          ok: false,
+          rutas: [],
+          error: 'Esa URL redirige, y el sondeo no sigue redirecciones. Usa la URL final.',
+        };
+      }
+
+      // ponytail: se lee el cuerpo entero y se recorta despues. Techo: una respuesta enorme pasa
+      // por memoria una vez. Camino: leer el stream por trozos y cortar, cuando alguien lo note.
+      const crudo = (await res.text()).slice(0, AutomationsService.TOPE_CUERPO);
+      let json: unknown;
+      let hayJson = false;
+      try {
+        json = JSON.parse(crudo);
+        hayJson = true;
+      } catch {
+        hayJson = false;
+      }
+
+      const ok = res.ok && hayJson;
+      if (!ok) {
+        // `cuerpo` y no solo `rutas: []`: un sondeo acaba en 401 mucho mas a menudo que en un
+        // JSON limpio, y con la lista vacia a secas la pantalla solo puede decir «no
+        // encontramos nada», que es mentira cuando la verdad es «tu API contesto 401».
+        return {
+          estado: res.status,
+          ok: false,
+          rutas: [],
+          cuerpo: crudo.slice(0, 2000),
+          ...(hayJson ? { respuesta: json } : {}),
+        };
+      }
+
+      // 2xx con JSON: aunque no haya nada que nombrar (`{}`), esto es un exito. Colapsarlo con
+      // el caso de arriba seria decirle «contesto mal» a una API que funciona.
+      const { rutas, truncado } = aplanarRespuesta(json, prefijo);
+      return { estado: res.status, ok: true, rutas, ...(truncado ? { truncado } : {}), respuesta: json };
+    } catch (e) {
+      const err = e as Error;
+      return fallo(err.name === 'AbortError' ? 'La API no contesto a tiempo (10 s).' : (err.message ?? 'No se pudo llamar.'));
+    } finally {
+      clearTimeout(t);
+    }
   }
 
   // --- metricas -------------------------------------------------------------------------

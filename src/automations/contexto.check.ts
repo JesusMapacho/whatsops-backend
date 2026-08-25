@@ -1,6 +1,6 @@
 // Check del contexto del run (v3 feature 18). Correr: npx ts-node src/automations/contexto.check.ts
 import * as assert from 'node:assert';
-import { NOMBRE_VAR, conSalida, conVariable, contextoDeMensaje, interpolar, valorDe } from './contexto';
+import { Contexto, NOMBRE_VAR, conSalida, conSalidaYVariable, conVariable, contextoDeMensaje, interpolar, valorDe } from './contexto';
 
 const ctx = contextoDeMensaje({
   texto: 'quiero precio',
@@ -127,6 +127,71 @@ assert.strictEqual(valorDe(hook, 'disparador.cuerpo.length'), 1);
 for (const malo of ['constructor', '__proto__', 'prototype']) {
   assert.strictEqual(valorDe(ctx, `mensaje.texto.${malo}`), undefined, malo);
   assert.strictEqual(interpolar(`x{{mensaje.${malo}}}y`, ctx), 'xy', malo);
+}
+
+// --- `conSalidaYVariable`: `guardarComo` y `campos` (features 18 y 47) ---
+// Es el ÚNICO sitio donde la salida de un nodo se convierte en variables, y lo comparten el
+// motor y la simulación en seco. Lo que se afirme aquí vale para los dos.
+{
+  const base: Contexto = { nodos: {}, vars: {} };
+  const salida = { status: 200, json: { data: [{ saldo: 10 }], cliente: { nombre: 'Ana' } } };
+
+  // Sin nada configurado: la salida queda bajo `nodos.<id>` y punto.
+  const solo = conSalidaYVariable(base, { id: 'n1', config: {} }, salida);
+  assert.deepStrictEqual(valorDe(solo, 'nodos.n1.status'), 200);
+  assert.deepStrictEqual(solo.vars, {});
+
+  // `guardarComo` sigue haciendo lo de siempre.
+  const conNombre = conSalidaYVariable(base, { id: 'n1', config: { guardarComo: 'api' } }, salida);
+  assert.strictEqual(valorDe(conNombre, 'vars.api.json.cliente.nombre'), 'Ana');
+
+  // `campos` nombra trozos, y las rutas son COMPLETAS: se leen sobre el contexto que YA lleva
+  // la salida dentro. Por eso no hace falta lógica de prefijo en ninguna capa.
+  const conCampos = conSalidaYVariable(
+    base,
+    {
+      id: 'n1',
+      config: {
+        guardarComo: 'api',
+        campos: [
+          { nombre: 'saldo', ruta: 'vars.api.json.data.0.saldo' },
+          { nombre: 'quien', ruta: 'vars.api.json.cliente.nombre' },
+        ],
+      },
+    },
+    salida,
+  );
+  assert.strictEqual(valorDe(conCampos, 'vars.saldo'), 10, 'el índice de una lista se resuelve');
+  assert.strictEqual(valorDe(conCampos, 'vars.quien'), 'Ana');
+  // Y el JSON entero sigue donde estaba: `campos` AÑADE nombres, no los sustituye.
+  assert.strictEqual(valorDe(conCampos, 'vars.api.status'), 200);
+
+  // Una ruta que no resuelve deja la variable a null, no la omite: omitirla haría que
+  // `{{vars.x}}` saliera LITERAL en vez de vacío, que es el aviso equivocado.
+  const roto = conSalidaYVariable(
+    base,
+    { id: 'n1', config: { guardarComo: 'api', campos: [{ nombre: 'x', ruta: 'vars.api.json.no.existe' }] } },
+    salida,
+  );
+  assert.strictEqual(valorDe(roto, 'vars.x'), null);
+  assert.strictEqual(interpolar('a{{vars.x}}b', roto), 'ab', 'vacío, no literal');
+
+  // La cadena de prototipos tampoco se alcanza por aquí: la ruta la escribe el operador.
+  const feo = conSalidaYVariable(
+    base,
+    { id: 'n1', config: { guardarComo: 'api', campos: [{ nombre: 'p', ruta: 'vars.api.constructor' }] } },
+    salida,
+  );
+  assert.strictEqual(valorDe(feo, 'vars.p'), null);
+
+  // Sin `guardarComo`, una ruta que empieza por `vars.` no resuelve — y es coherente con que
+  // sondear sin nombre sea un 400: sin prefijo no hay ruta que elegir.
+  const sinNombre = conSalidaYVariable(
+    base,
+    { id: 'n1', config: { campos: [{ nombre: 'x', ruta: 'vars.api.json.cliente.nombre' }] } },
+    salida,
+  );
+  assert.strictEqual(valorDe(sinNombre, 'vars.x'), null);
 }
 
 console.log('contexto.check OK');

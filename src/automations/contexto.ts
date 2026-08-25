@@ -172,7 +172,33 @@ export function conSalida(ctx: Contexto, nodeId: string, salida: unknown): Conte
  * evitar.
  */
 export function conSalidaYVariable(ctx: Contexto, nodo: { id: string; config: unknown }, output: unknown): Contexto {
+  const config = (nodo.config ?? {}) as Record<string, unknown>;
   const conNodo = conSalida(ctx, nodo.id, output);
-  const nombre = (nodo.config as Record<string, unknown> | null)?.guardarComo;
-  return typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
+  const nombre = config.guardarComo;
+  let fuera = typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
+
+  // 47: `campos` nombra trozos de la salida para que el resto del flujo diga `{{vars.saldo}}`
+  // en vez de `{{vars.api.json.data.0.account.balance}}`. Va AQUÍ y no en el handler del nodo
+  // por tres cosas, y las tres son la razón de elegir este sitio: el motor no se entera, la
+  // simulación en seco (42) lo hereda sin tocar una línea, y sirve para cualquier nodo que
+  // devuelva algo — no distinguir es menos código que distinguir.
+  //
+  // Las rutas son COMPLETAS (`vars.api.json.saldo`) y se leen sobre el contexto que YA lleva la
+  // salida dentro, por eso se resuelven contra `fuera` y no contra `ctx`. Así no hace falta
+  // lógica de prefijo en ninguna capa: el argumento entero, en `contrato/47 §2`.
+  //
+  // `valorDe` y no un acceso a mano: es lo que bloquea `constructor` y la cadena de
+  // prototipos, y aquí la ruta la escribe el operador.
+  const campos = config.campos;
+  if (Array.isArray(campos)) {
+    for (const raw of campos) {
+      const par = (raw ?? {}) as { nombre?: unknown; ruta?: unknown };
+      if (typeof par.nombre !== 'string' || !par.nombre || typeof par.ruta !== 'string') continue;
+      // Una ruta que no resuelve deja la variable a null, no la omite: omitirla haría que
+      // `{{vars.saldo}}` saliera literal en vez de vacío, que es el aviso equivocado (ver la
+      // distinción vacía/inalcanzable del contrato 42).
+      fuera = conVariable(fuera, par.nombre, valorDe(fuera, par.ruta) ?? null);
+    }
+  }
+  return fuera;
 }

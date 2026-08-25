@@ -122,6 +122,18 @@ export class AutomationsController {
     return this.automations.simularFlujo(user.tenantId, id, body);
   }
 
+  // Llamar a la API del nodo UNA vez y devolver la forma de lo que contesta (feature 47).
+  // Configurarlo era a ciegas: se tecleaba `{{vars.api.json...}}` adivinando y se descubria si
+  // acertaste cuando escribia un cliente.
+  //
+  // Llama de VERDAD a una URL que teclea alguien, asi que pasa por `assertSafeOutboundUrl` y no
+  // sigue redirecciones. No crea ninguna fila.
+  @Post('automations/:id/sondear')
+  @RequirePermissions('automations:manage')
+  sondear(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: unknown) {
+    return this.automations.sondear(user.tenantId, id, body);
+  }
+
   @Get('automations/:id/runs')
   @RequirePermissions('automations:manage')
   runs(@CurrentUser() user: AuthUser, @Param('id') id: string, @Query('limit') limit?: string) {

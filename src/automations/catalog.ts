@@ -16,7 +16,7 @@ import { TRIGGERS } from './triggers';
 
 // --- Contrato ----------------------------------------------------------------------
 
-export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion' | 'codigo';
+export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion' | 'codigo' | 'campos';
 
 export interface Campo {
   tipo: TipoCampo;
@@ -481,6 +481,15 @@ export const NODE_TYPES: NodeType[] = [
       },
       metodo: { tipo: 'opcion', label: 'Método', opciones: ['GET', 'POST'] },
       cuerpo: { tipo: 'texto', label: 'Cuerpo (JSON)', ayuda: 'Admite {{...}}' },
+      // 47: nombrar campos de la respuesta para no arrastrar la ruta larga por todo el flujo.
+      // Sin esto, la forma de la API queda escrita en cada nodo que la usa, y el día que el
+      // proveedor renombre un campo hay que encontrar los cinco sitios.
+      campos: {
+        tipo: 'campos',
+        label: 'Guardar campos con nombre',
+        sinInterpolar: true,
+        ayuda: 'Sondea la API para ver qué devuelve y elige qué guardar.',
+      },
     },
     handler: async (config, ej) => {
       const url = texto(config, 'url', ej);
@@ -723,6 +732,34 @@ export function validarConfig(key: string, config: unknown): Record<string, unkn
       case 'boolean':
         out[campo] = v === true || v === 'true';
         break;
+      // 47: pares «nombre → ruta». Se valida entero aquí y no en el handler por el mismo
+      // motivo que todo lo demás: un nombre malo no puede descubrirse en ejecución, cuando ya
+      // no hay nadie mirando la pantalla donde se configuró.
+      case 'campos': {
+        if (!Array.isArray(v)) throw new BadRequestException(`${tipo.label}: «${def.label}» tiene que ser una lista`);
+        const pares = v.map((raw) => {
+          const par = (raw ?? {}) as Record<string, unknown>;
+          const nombre = typeof par.nombre === 'string' ? par.nombre.trim() : '';
+          const ruta = typeof par.ruta === 'string' ? par.ruta.trim() : '';
+          if (!nombre || !ruta) throw new BadRequestException(`${tipo.label}: cada campo necesita un nombre y una ruta`);
+          // Mismo control y mismo mensaje que `guardarComo`: un «mi total» se guardaría tan
+          // ricamente y no resolvería nunca, en silencio.
+          if (!NOMBRE_VAR.test(nombre)) {
+            throw new BadRequestException(
+              `${tipo.label}: «${nombre}» no vale como nombre de variable. Solo letras, números y guion bajo, empezando por letra.`,
+            );
+          }
+          return { nombre, ruta };
+        });
+        const repes = pares.map((p) => p.nombre).filter((n, i, a) => a.indexOf(n) !== i);
+        if (repes.length) {
+          // Sin esto el último gana en silencio, y el operador ve una variable con el valor de
+          // otra sin nada que se lo diga.
+          throw new BadRequestException(`${tipo.label}: «${repes[0]}» está dos veces en «${def.label}»`);
+        }
+        out[campo] = pares;
+        break;
+      }
       case 'opcion':
         if (!def.opciones?.includes(String(v))) {
           throw new BadRequestException(
