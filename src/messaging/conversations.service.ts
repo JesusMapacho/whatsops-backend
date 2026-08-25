@@ -88,6 +88,15 @@ export class ConversationsService {
 
     // Conteo de no leídos en UNA query: el corte (lastReadAt) es por conversación,
     // así que un groupBy no basta; se correlaciona con Conversation en SQL crudo.
+    //
+    // Y `direction = 'in'` NO es un detalle del conteo: la app depende de él. Su lista de
+    // «conversaciones esperando» filtra por `unread > 0` y luego ordena por `lastInboundAt`
+    // tratando el null como el valor más antiguo — o sea que una conversación sin ningún
+    // entrante saldría la PRIMERA, presentada como la que más lleva esperando. Hoy no puede
+    // pasar, y no por suerte: `unread > 0` implica al menos un entrante, y todo entrante deja
+    // `lastInboundAt` puesto (`webhook.processor.ts` resuelve con `inbound: direction === 'in'`
+    // y `contact-resolve.ts:176` lo escribe). El día que esto cuente algo que no sea un
+    // entrante, esa pantalla empieza a mentir sin dar ningún error.
     const ids = convs.map((c) => c.id);
     const rows = ids.length
       ? await this.prisma.$queryRaw<{ conversationId: string; unread: number }[]>`
