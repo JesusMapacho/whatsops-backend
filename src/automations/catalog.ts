@@ -57,6 +57,19 @@ export function modoRutas(campo: Campo): ModoRutas | null {
 
 export type ConfigSchema = Record<string, Campo>;
 
+/**
+ * La key del nodo «Ejecutar flujo» (43), y cómo se lee a quién llama.
+ *
+ * Viven aquí y no en `llamadas.ts` porque el catálogo es quien define la forma de la config:
+ * si el nombre del campo cambia, cambia en el sitio donde se declara y no en dos.
+ */
+export const TIPO_LLAMADA = 'automation.run';
+
+export function idDeLlamada(config: unknown): string | null {
+  const v = (config as Record<string, unknown> | null)?.automationId;
+  return typeof v === 'string' && v ? v : null;
+}
+
 export interface Servicios {
   messaging: {
     send(tenantId: string, conversationId: string, body: any): Promise<any>;
@@ -82,6 +95,9 @@ export interface Servicios {
 
 export interface Ejecucion {
   tenantId: string;
+  /** El nodo que se está ejecutando. Lo necesita `automation.run` (43): el hijo se identifica
+   *  por `(parentRunId, parentNodeId)`, y ese segundo es este. */
+  nodeId?: string;
   /** El admin que activó la automatización. Null = lo borraron; los nodos que necesitan
    *  usuario fallan con un mensaje claro en vez de actuar como cualquiera. */
   actorUserId: string | null;
