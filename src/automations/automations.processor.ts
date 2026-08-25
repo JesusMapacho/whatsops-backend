@@ -15,7 +15,7 @@ import { MessagingService } from '../messaging/messaging.service';
 import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
-import { Contexto, conSalida, conVariable } from './contexto';
+import { Contexto, conSalidaYVariable } from './contexto';
 import { Salida, Servicios, interpolarConfig, nodeType } from './catalog';
 import { MAX_REVIVIDOS, queHacerCon } from './barrido';
 import { nodoRaiz, siguienteNodoId } from './graph';
@@ -222,7 +222,7 @@ export class AutomationsProcessor extends WorkerHost {
     if (!tipo?.handler) {
       const carga = (contextoPrevio.disparador ?? null) as unknown;
       await this.registrarPaso(run, nodo.id, 'skipped', null, carga, null);
-      return this.continuar(run, edges, nodo.id, null, this.conSalidaYVariable(contextoPrevio, nodo, carga));
+      return this.continuar(run, edges, nodo.id, null, conSalidaYVariable(contextoPrevio, nodo, carga));
     }
 
     // IDEMPOTENCIA: si este nodo ya salió bien, el job es un reintento de algo posterior.
@@ -237,7 +237,7 @@ export class AutomationsProcessor extends WorkerHost {
       // reencaminara por la salida por defecto, un reintento podría irse por la rama
       // equivocada, que en este motor significa mandarle otra cosa a un cliente.
       const rama = (previo.output as { rama?: string | null } | null)?.rama ?? null;
-      return this.continuar(run, edges, nodo.id, rama, this.conSalidaYVariable(contextoPrevio, nodo, previo.output ?? null));
+      return this.continuar(run, edges, nodo.id, rama, conSalidaYVariable(contextoPrevio, nodo, previo.output ?? null));
     }
 
     let salida: Salida;
@@ -270,7 +270,7 @@ export class AutomationsProcessor extends WorkerHost {
     }
 
     await this.registrarPaso(run, nodo.id, 'ok', nodo.config, salida.output ?? null, null);
-    const contexto = this.conSalidaYVariable(contextoPrevio, nodo, salida.output ?? null);
+    const contexto = conSalidaYVariable(contextoPrevio, nodo, salida.output ?? null);
 
     // Espera por RESPUESTA: el run se aparca y lo reanuda el próximo entrante de esa
     // conversación (`trigger-on-inbound.ts`).
@@ -394,11 +394,6 @@ export class AutomationsProcessor extends WorkerHost {
    * idempotente— a propósito: si el reintento no repusiera la variable, los nodos siguientes
    * la encontrarían vacía y seguirían adelante sin decir nada.
    */
-  private conSalidaYVariable(ctx: Contexto, nodo: { id: string; config: unknown }, output: unknown): Contexto {
-    const conNodo = conSalida(ctx, nodo.id, output);
-    const nombre = (nodo.config as Record<string, unknown> | null)?.guardarComo;
-    return typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
-  }
 
   /** Las constantes del negocio, como `{{ajustes.precio_kg}}`. */
   private async ajustes(tenantId: string): Promise<Record<string, string>> {

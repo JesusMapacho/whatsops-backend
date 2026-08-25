@@ -47,6 +47,25 @@ export function valorDe(ctx: Contexto, ruta: string): unknown {
 }
 
 /**
+ * Qué le pasó a cada `{{...}}` de un texto. Existe para la simulación en seco (feature 42):
+ * en pantalla `Hola ` y `Hola` son indistinguibles, así que sin esto el operador no puede
+ * saber si ahí había una variable que se resolvió a nada.
+ *
+ * - `ok` — resolvió a algo.
+ * - `vacia` — la ruta es válida pero no hay valor: sale vacío, que es el contrato de
+ *   `interpolar` («Hola {{nombre}}» es peor que «Hola»).
+ * - `inalcanzable` — no parsea, así que se queda literal con las llaves. El nombre está mal
+ *   escrito y NUNCA va a resolver, por mucho que se rellene el dato.
+ *
+ * Lo llena `interpolar` misma, de paso, y por eso no puede divergir del intérprete: si se
+ * calculara aparte, el aviso acabaría hablando de otra sustitución que la que ocurre.
+ */
+export interface VariableVista {
+  ruta: string;
+  estado: 'ok' | 'vacia' | 'inalcanzable';
+}
+
+/**
  * Sustituye `{{ruta}}` —y ahora `{{ruta | funcion:arg}}`— por su valor.
  *
  * Dos contratos que no cambian, y son los importantes porque el texto sale hacia un cliente
@@ -59,11 +78,18 @@ export function valorDe(ctx: Contexto, ruta: string): unknown {
  *
  * La gramática (`LLAVES`) y las funciones viven en `expresiones.ts`, en un solo sitio.
  */
-export function interpolar(texto: string, ctx: Contexto): string {
+export function interpolar(texto: string, ctx: Contexto, vistas?: VariableVista[]): string {
   return texto.replace(LLAVES, (crudo, dentro: string) => {
     const e = parseExpresion(dentro);
-    if (!e) return crudo;
+    if (!e) {
+      // No parsea: se queda literal, con las llaves. NO es una variable vacía — es un nombre
+      // que no se puede alcanzar («vars.mi campo», con espacio). Son dos avisos distintos y
+      // arreglar el que no es cuesta una tarde.
+      vistas?.push({ ruta: dentro.trim(), estado: 'inalcanzable' });
+      return crudo;
+    }
     const v = aplicar(valorDe(ctx, e.ruta), e.funciones);
+    vistas?.push({ ruta: e.ruta, estado: v === undefined || v === null || v === '' ? 'vacia' : 'ok' });
     if (v === undefined || v === null) return '';
     // `JSON.stringify` es el último recurso para un objeto al que no se le puso una función
     // que lo formatee: sale con corchetes y comillas, y se ve mal a propósito. Para eso está
@@ -133,4 +159,20 @@ export function conVariable(ctx: Contexto, nombre: string, valor: unknown): Cont
 export function conSalida(ctx: Contexto, nodeId: string, salida: unknown): Contexto {
   const nodos = (ctx.nodos ?? {}) as Record<string, unknown>;
   return { ...ctx, nodos: { ...nodos, [nodeId]: salida ?? null } };
+}
+
+/**
+ * Lo que hace un nodo con su salida: la guarda bajo `nodos.<id>` y, si el operador le puso
+ * nombre en «Guardar el resultado como», también bajo `vars.<nombre>`.
+ *
+ * Vive aquí y no en el motor porque ahora hay DOS recorridos del grafo —el worker y la
+ * simulación en seco (feature 42)— y esta es justo la regla que no puede divergir entre
+ * ellos: si la simulación nombrara las variables de otra forma, enseñaría un contexto final
+ * que no es el que va a pasar en producción, que es la mentira que la feature existe para
+ * evitar.
+ */
+export function conSalidaYVariable(ctx: Contexto, nodo: { id: string; config: unknown }, output: unknown): Contexto {
+  const conNodo = conSalida(ctx, nodo.id, output);
+  const nombre = (nodo.config as Record<string, unknown> | null)?.guardarComo;
+  return typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
 }

@@ -9,7 +9,7 @@
 // que la ventana de 24 h, los topes anti-baneo, el alcance por rol y las reglas del CRM
 // valgan igual desde una automatización que desde la pantalla.
 import { BadRequestException } from '@nestjs/common';
-import { Contexto, NOMBRE_VAR, interpolar, valorDe } from './contexto';
+import { Contexto, NOMBRE_VAR, VariableVista, interpolar, valorDe } from './contexto';
 import { TOPE_MS, ejecutarCodigo } from './codigo';
 import { ramaDeCondicion, ramaDeSwitch } from './comparadores';
 import { TRIGGERS } from './triggers';
@@ -649,11 +649,19 @@ export function schemaDe(tipo: NodeType): ConfigSchema {
  * que la pantalla lo dijera — entre ellos el `valor` de «Si… entonces», que comparaba contra
  * el literal «{{vars.x}}» y por tanto se iba SIEMPRE por la rama falsa, en silencio.
  */
-export function interpolarConfig(tipo: NodeType, config: unknown, ctx: Contexto): Record<string, unknown> {
+export function interpolarConfig(
+  tipo: NodeType,
+  config: unknown,
+  ctx: Contexto,
+  /** Si se pasa, se llena con qué le pasó a cada `{{...}}`. Lo usa la simulación en seco
+   *  (feature 42). Va por aquí y no por un recorrido aparte para que el aviso hable
+   *  exactamente de los campos que SÍ se interpolan: `sinInterpolar` los excluye a los dos. */
+  vistas?: VariableVista[],
+): Record<string, unknown> {
   const src = (config ?? {}) as Record<string, unknown>;
   const schema = schemaDe(tipo);
   const hondo = (v: unknown): unknown => {
-    if (typeof v === 'string') return interpolar(v, ctx);
+    if (typeof v === 'string') return interpolar(v, ctx, vistas);
     if (Array.isArray(v)) return v.map(hondo);
     if (v && typeof v === 'object') {
       return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, hondo(x)]));

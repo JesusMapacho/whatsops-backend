@@ -11,7 +11,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { catalogoPublico, nodeType, validarConfig, validarTrigger } from './catalog';
 import { problemasDelGrafo } from './graph';
 import { patronCron } from './triggers';
-import { NOMBRE_VAR } from './contexto';
+import { NOMBRE_VAR, contextoDeMensaje } from './contexto';
+import { entradaSegunTrigger, simular } from './simulacion';
+import { channelAdapter } from '../messaging/channels';
+import { isWithinWindow } from '../messaging/messaging.util';
 import { catalogoDeFunciones, problemasDeFunciones } from './expresiones';
 import { AUTOMATION_QUEUE } from './automations.queue';
 import { nuevoTokenDeHook, urlDelHook } from './hooks';
@@ -412,6 +415,121 @@ export class AutomationsService {
     if (!run) throw new BadRequestException('Ya hay una ejecución en curso para esa conversación.');
     await this.cola.add('run', { runId: run.id });
     return run;
+  }
+
+  // --- simulacion en seco (feature 42) ---------------------------------------------------
+
+  /**
+   * Recorre el grafo con una entrada inventada y devuelve que HARIA, sin que salga nada.
+   *
+   * Vive aqui y no en el processor porque no es un run: no hay fila, no hay job y no hay
+   * candado. Lo unico que este metodo hace es reunir lo que la simulacion necesita de la base
+   * —el grafo, el contexto, los ajustes y el freno de la ventana— y pasarselo a `simular`,
+   * que es puro. El argumento entero, en `contrato/42`.
+   *
+   * Funciona en borrador: `runManual` exige `active` y eso obligaba a activar para probar,
+   * que es justo el problema. Tampoco valida el grafo con `problemasDelGrafo`: a medio dibujar
+   * esta roto por definicion, y probar el trozo que ya existe es para lo que se simula.
+   */
+  async simularFlujo(tenantId: string, id: string, body: unknown) {
+    const a = await this.get(tenantId, id);
+    const src = (body ?? {}) as Record<string, unknown>;
+    // La clave es `type`, no `tipo` (`validarTrigger`, catalog.ts:753). Con la equivocada esto
+    // caia siempre al 'manual' y la simulacion de una palabra clave decia que la habia
+    // disparado otra cosa.
+    const tipoTrigger =
+      a.trigger && typeof a.trigger === 'object' && typeof (a.trigger as { type?: unknown }).type === 'string'
+        ? ((a.trigger as { type: string }).type)
+        : 'manual';
+    const { texto, payload, messageId } = entradaSegunTrigger(tipoTrigger, src);
+    let conversationId =
+      typeof src.conversationId === 'string' && src.conversationId ? src.conversationId : null;
+
+    // Repetir un mensaje real. El alcance va en el `where` y no en un `if` posterior: es el
+    // sitio donde se pierde el aislamiento, y aqui el id lo escribe quien llama.
+    let contexto: Record<string, unknown>;
+    if (messageId) {
+      const msg = await this.prisma.message.findFirst({
+        where: { id: messageId, tenantId },
+        include: { conversation: { include: { contact: { select: { id: true, name: true, waId: true } } } } },
+      });
+      if (!msg) throw new NotFoundException('Mensaje no encontrado');
+      conversationId = msg.conversationId;
+      const cuerpo = (msg.payload ?? {}) as { text?: { body?: string } };
+      contexto = contextoDeMensaje({
+        texto: cuerpo.text?.body ?? '',
+        wamid: msg.wamid,
+        contacto: {
+          id: msg.conversation.contact.id,
+          nombre: msg.conversation.contact.name,
+          waId: msg.conversation.contact.waId,
+        },
+        conversationId: msg.conversationId,
+        tipo: tipoTrigger,
+      });
+    } else if (texto) {
+      // Un mensaje inventado: mismo armador que el entrante de verdad, para que el contexto
+      // tenga las mismas claves. Si hay conversacion, se le pega su contacto.
+      const conv = conversationId
+        ? await this.prisma.conversation.findFirst({
+            where: { id: conversationId, tenantId },
+            include: { contact: { select: { id: true, name: true, waId: true } } },
+          })
+        : null;
+      contexto = contextoDeMensaje({
+        texto,
+        contacto: conv ? { id: conv.contact.id, nombre: conv.contact.name, waId: conv.contact.waId } : null,
+        conversationId,
+        tipo: tipoTrigger,
+      });
+    } else {
+      contexto = await contextoDeConversacion(this.prisma, tenantId, conversationId, {
+        tipo: tipoTrigger,
+        ...(payload !== null ? { cuerpo: payload } : {}),
+      });
+    }
+
+    const [variables, conv] = await Promise.all([
+      this.prisma.tenantVariable.findMany({ where: { tenantId }, select: { name: true, value: true } }),
+      conversationId
+        ? this.prisma.conversation.findFirst({
+            where: { id: conversationId, tenantId },
+            select: { platform: true, lastInboundAt: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    // El freno de la ventana de 24 h se evalua UNA vez: es una propiedad de la conversacion
+    // —cuando escribio el cliente por ultima vez—, no de cada nodo, y solo se reabre con un
+    // entrante. Mismo predicado y mismo mensaje que `messaging.service.ts:122`, para que la
+    // simulacion no invente un freno distinto del que va a aplicarse de verdad.
+    const adapter = conv ? channelAdapter(conv.platform) : null;
+    const frenoEnvio =
+      adapter && adapter.enforcesWindow && !isWithinWindow(conv!.lastInboundAt)
+        ? adapter.windowClosedMessage
+        : null;
+
+    return simular({
+      nodes: a.nodes,
+      edges: a.edges,
+      contexto,
+      tenantId,
+      actorUserId: a.actorUserId,
+      conversationId,
+      ajustes: Object.fromEntries(variables.map((v) => [v.name, v.value])),
+      // `null` sobrevive al filtro a proposito: significa «no contesto» y encamina por la rama
+      // de caducidad. Lo que se cae es cualquier otra cosa (numeros, objetos), que solo puede
+      // venir de un cliente mal escrito.
+      respuestas: Array.isArray(src.respuestas)
+        ? src.respuestas.filter((r): r is string | null => typeof r === 'string' || r === null)
+        : [],
+      httpRespuestas:
+        src.httpRespuestas && typeof src.httpRespuestas === 'object'
+          ? (src.httpRespuestas as Record<string, unknown>)
+          : {},
+      permitirHttpReal: src.permitirHttpReal === true,
+      frenoEnvio,
+    });
   }
 
   // --- metricas -------------------------------------------------------------------------

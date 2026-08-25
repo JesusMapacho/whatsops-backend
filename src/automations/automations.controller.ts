@@ -114,6 +114,14 @@ export class AutomationsController {
     return this.automations.runManual(user.tenantId, id, body);
   }
 
+  // Probar sin mandarle nada a nadie (feature 42). Su gemelo de arriba, `/run`, crea un run
+  // de VERDAD: el mensaje sale y el trato se crea. Este no toca nada y funciona en borrador.
+  @Post('automations/:id/simular')
+  @RequirePermissions('automations:manage')
+  simular(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: unknown) {
+    return this.automations.simularFlujo(user.tenantId, id, body);
+  }
+
   @Get('automations/:id/runs')
   @RequirePermissions('automations:manage')
   runs(@CurrentUser() user: AuthUser, @Param('id') id: string, @Query('limit') limit?: string) {
