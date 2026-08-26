@@ -12,7 +12,7 @@ import { catalogoPublico, interpolarConfig, nodeType, validarConfig, validarTrig
 import { problemasDelGrafo } from './graph';
 import { FlujoConocido, idsLlamados, problemasDeLlamadas } from './llamadas';
 import { patronCron } from './triggers';
-import { NOMBRE_VAR, contextoDeMensaje } from './contexto';
+import { NOMBRE_VAR, VariableVista, contextoDeMensaje } from './contexto';
 import { entradaSegunTrigger, simular } from './simulacion';
 import { aplanarRespuesta } from './sondeo';
 import { assertSafeOutboundUrl } from '../waha/waha.url';
@@ -731,14 +731,27 @@ export class AutomationsService {
     });
     // Mismo interpolador que el motor, para que la URL que se llama aqui sea EXACTAMENTE la que
     // se llamaria en produccion. Si se resolviera de otra forma, el sondeo probaria otra API.
-    const config = interpolarConfig(tipoHttp, configCruda, {
-      ...contexto,
-      ajustes: Object.fromEntries(variables.map((v) => [v.name, v.value])),
-    });
+    //
+    // Y se recoge QUE le paso a cada `{{...}}`, con el mismo colector de la 42. El sondeo se
+    // suele lanzar desde la pestana de configuracion, con el sobre de prueba vacio: entonces una
+    // URL con `{{contacto.waId}}` se llama con ese hueco en blanco y la API contesta un 404 que
+    // no dice por que. Sin esto, el operador ve «404» y da por rota su API.
+    //
+    // Es el mismo problema que `variables` resuelve en los pasos —«Hola » y «Hola» son
+    // indistinguibles— una capa mas arriba: en la URL.
+    const vistas: VariableVista[] = [];
+    const config = interpolarConfig(
+      tipoHttp,
+      configCruda,
+      { ...contexto, ajustes: Object.fromEntries(variables.map((v) => [v.name, v.value])) },
+      vistas,
+    );
+    // Sin repetidas, igual que en los pasos: la misma ruta escrita dos veces es un aviso, no dos.
+    const avisos = [...new Map(vistas.map((v) => [`${v.ruta}|${v.estado}`, v])).values()];
 
     const prefijo = `vars.${guardarComo}.json`;
     const metodo = config.metodo === 'POST' ? 'POST' : 'GET';
-    const fallo = (error: string) => ({ estado: 0, ok: false, rutas: [], error });
+    const fallo = (error: string) => ({ estado: 0, ok: false, rutas: [], variables: avisos, error });
 
     let url: URL;
     try {
@@ -766,6 +779,7 @@ export class AutomationsService {
           estado: res.status,
           ok: false,
           rutas: [],
+          variables: avisos,
           error: 'Esa URL redirige, y el sondeo no sigue redirecciones. Usa la URL final.',
         };
       }
@@ -791,6 +805,7 @@ export class AutomationsService {
           estado: res.status,
           ok: false,
           rutas: [],
+          variables: avisos,
           cuerpo: crudo.slice(0, 2000),
           ...(hayJson ? { respuesta: json } : {}),
         };
@@ -799,7 +814,7 @@ export class AutomationsService {
       // 2xx con JSON: aunque no haya nada que nombrar (`{}`), esto es un exito. Colapsarlo con
       // el caso de arriba seria decirle «contesto mal» a una API que funciona.
       const { rutas, truncado } = aplanarRespuesta(json, prefijo);
-      return { estado: res.status, ok: true, rutas, ...(truncado ? { truncado } : {}), respuesta: json };
+      return { estado: res.status, ok: true, rutas, variables: avisos, ...(truncado ? { truncado } : {}), respuesta: json };
     } catch (e) {
       const err = e as Error;
       return fallo(err.name === 'AbortError' ? 'La API no contesto a tiempo (10 s).' : (err.message ?? 'No se pudo llamar.'));
