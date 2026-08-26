@@ -92,6 +92,14 @@ export interface Simulacion {
   context: Contexto;
   error: string | null;
   createdAt: string;
+  /**
+   * SIEMPRE presente, y `null` porque una simulación nunca tiene padre (43). No es opcional a
+   * propósito: un run real de primer nivel ya manda `null`, así que admitir la ausencia dejaría
+   * **dos codificaciones de «no tiene padre»** y obligaría a la pantalla a ramificar tres
+   * estados donde hay dos casos. Lo contrario del `truncado` del 47, donde ausente y presente sí
+   * dicen cosas distintas. Enmienda fechada en `contrato/43 §La ejecución`.
+   */
+  parent: null;
   steps: PasoSimulado[];
   /** No-nulo exactamente cuando `status === 'waiting'`: paró y espera que le des algo. */
   pendiente: { nodeId: string; tipo: 'wait.reply' | 'http.request' } | null;
@@ -355,6 +363,7 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
     try {
       salida = await tipo.handler(config, {
         tenantId: e.tenantId,
+        nodeId: actual.id,
         actorUserId: e.actorUserId,
         // Un id de conversación falso cuando no hay ninguna: nada toca la base, así que el
         // único efecto es que los nodos que la necesitan se puedan probar igual, en vez de
@@ -496,6 +505,7 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
     context: ctx,
     error,
     createdAt: ahora(),
+    parent: null,
     steps,
     pendiente,
   };

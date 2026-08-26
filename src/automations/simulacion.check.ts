@@ -62,6 +62,10 @@ async function main() {
 
     assert.strictEqual(r.status, 'done');
     assert.strictEqual(r.simulado, true);
+    // `null`, no ausente: la app tendría que ramificar tres estados para una pregunta de dos
+    // casos, porque un run real de primer nivel ya manda `null`. Enmienda de `contrato/43`.
+    assert.ok('parent' in r, 'la simulación tiene forma de Ejecucion: `parent` viaja siempre');
+    assert.strictEqual(r.parent, null);
     assert.strictEqual(r.id, 'simulacion', 'id fijo: nunca puede casar con un run del historial');
     assert.strictEqual(r.pendiente, null);
     assert.strictEqual(r.steps.length, 2, 'el trigger cuenta como paso, igual que en el motor');
