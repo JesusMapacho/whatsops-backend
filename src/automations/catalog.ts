@@ -580,6 +580,11 @@ export const NODE_TYPES: NodeType[] = [
       // proveedor renombre un campo hay que encontrar los cinco sitios.
       campos: {
         tipo: 'campos',
+        fuente: 'sondeo',
+        // Las rutas salen del SONDEO de este nodo, no del contexto: son campos de lo que
+        // devolvió la API. Sin esta palabra el editor —que no lo deriva, y hace bien— ofrecería
+        // el autocompletado del contexto y el sondeo no llegaría nunca al campo. O sea, la
+        // feature entera sin funcionar por una omisión que no da ningún error.
         label: 'Guardar campos con nombre',
         sinInterpolar: true,
         ayuda: 'Sondea la API para ver qué devuelve y elige qué guardar.',

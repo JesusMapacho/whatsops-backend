@@ -140,6 +140,24 @@ assert.strictEqual(modoRutas(GUARDAR_COMO), null, 'en un nombre no se sugieren r
 assert.strictEqual(modoRutas(nodeType('wait.delay')!.configSchema.minutos), null, 'un number no lleva rutas');
 assert.strictEqual(modoRutas(nodeType('logic.condition')!.configSchema.operador), null, 'un desplegable tampoco');
 
+// --- un campo `campos` SIN `fuente` es la feature entera sin funcionar --------------------
+// `fuente` dice de dónde salen las sugerencias: del sondeo de ese nodo, o del contexto. El
+// editor NO la deriva —adivinarla por el tipo de nodo es la regla implícita que después nadie
+// encuentra— así que un `campos` sin declararla cae al autocompletado equivocado y el operador
+// no ve nunca lo que su API devolvió. No da ningún error: simplemente ofrece otra cosa.
+//
+// Pasó de verdad: `http.request.campos` es de la 47 y `fuente` nació con la 43, así que el
+// campo viejo se quedó sin anotar y lo encontró el frontend leyendo el catálogo.
+for (const t of NODE_TYPES) {
+  for (const [clave, def] of Object.entries(schemaDe(t))) {
+    if (def.tipo !== 'campos') continue;
+    assert.ok(
+      def.fuente === 'sondeo' || def.fuente === 'contexto',
+      `${t.key}.${clave}: un campo \`campos\` tiene que declarar \`fuente\``,
+    );
+  }
+}
+
 // --- el flag `espera` no se puede olvidar (43) --------------------------------------------
 // Las guardas ESTÁTICAS de la 43 —el desplegable de `/llamables` y la activación— preguntan por
 // `tipo.espera` para saber si un flujo se puede llamar. La guarda de EJECUCIÓN pregunta por
