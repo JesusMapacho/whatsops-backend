@@ -99,6 +99,23 @@ razón de elegirlo:
    pantalla para los demás todavía, pero el mecanismo no distingue — y no distinguir es
    menos código que distinguir.
 
+## `variables` en la respuesta del sondeo (enmienda, 26 ago 2026)
+
+El sondeo se lanza desde la pestaña de configuración, donde el sobre de prueba —el mismo de
+`/simular`— está **vacío**. Así que una URL con `{{contacto.waId}}` se llama con ese hueco en
+blanco, la API contesta un 404, y **el operador da por rota su API** cuando lo que falta es el
+contacto.
+
+`/sondear` devuelve `variables: [{ruta, estado}]` con el mismo colector que la 42 usa en los
+pasos, una capa más arriba: en la URL y el cuerpo. **Viaja siempre, incluidos los cuatro caminos
+de fallo** — que es justo donde hace falta, porque es donde el 404 no se explica solo.
+
+Se descartó el aviso fijo en el `ayuda` del campo, que era la otra opción: un cartel que sale
+siempre no dice **cuál** variable salió vacía en **este** sondeo, y se deja de leer a la tercera
+vez. Lo levantó el frontend probando el flujo real de trabajo, no una prueba.
+
+Contrato: `../GW/contrato/47-descubrir-la-api.md` §12.
+
 ## Seguridad: esto llama a una URL que teclea alguien
 
 Es lo único de esta feature que no se puede hacer «lo más simple que funcione».
