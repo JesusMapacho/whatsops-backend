@@ -18,6 +18,8 @@ import {
   TOPE_SUBRUNS,
   TOPE_TIEMPO_MS,
   ejecutarSubflujo,
+  nivelDelHijo,
+  problemaAntesDeLlamar,
 } from './subflujo';
 
 // Un sub-flujo no puede llamar a la red. Se rompe `fetch` para todo el archivo, igual que en
@@ -318,6 +320,28 @@ async function main() {
     assert.deepStrictEqual(d.enviados, ['Hola Ana'], 'lo que sale sí va interpolado');
     // El historial de un run de verdad se lee igual que el de cualquier otro: config cruda.
     // Sólo la simulación guarda la resuelta, y eso está declarado en `contrato/42 §4b`.
+  }
+
+  // --- Los dos niveles no son el mismo, y confundirlos ya rompió la feature entera ---------
+  // El bug: el motor le daba a `problemaAntesDeLlamar` el nivel DEL HIJO, así que el hijo se
+  // encontraba a sí mismo en la cadena y **toda primera llamada** moría con «bucle». Ningún
+  // check lo vio porque el fallo estaba en el cableado del processor, no en este módulo; lo
+  // que se puede afirmar desde aquí es la diferencia entre los dos niveles, que es lo que se
+  // confundió. Se pilló corriendo `seed43-padre` contra la base el 2026-08-26.
+  {
+    const delPadre = nivelBase(); // cadena: ['padre'], o sea SOLO los antepasados
+    const f = flujo([trigger], []);
+    assert.strictEqual(problemaAntesDeLlamar(f, delPadre), null, 'la primera llamada no es un bucle');
+
+    const delHijo = nivelDelHijo(delPadre, f.id);
+    assert.deepStrictEqual(delHijo.cadena, ['padre', 'hijo'], 'el del hijo SÍ se lleva a sí mismo');
+    assert.strictEqual(delHijo.profundidad, delPadre.profundidad + 1);
+    assert.strictEqual(delHijo.presupuesto, delPadre.presupuesto, 'el presupuesto es del árbol, no una copia');
+    assert.match(
+      String(problemaAntesDeLlamar(f, delHijo)),
+      /bucle/,
+      'dárselo a la guarda es exactamente el bug: se ve a sí mismo',
+    );
   }
 
   console.log('subflujo.check.ts OK');

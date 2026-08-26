@@ -16,7 +16,7 @@ import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
 import { Contexto, conSalidaYVariable } from './contexto';
-import { ErrorDeSubflujo, Nivel, Persistencia, TOPE_TIEMPO_MS, ejecutarSubflujo } from './subflujo';
+import { ErrorDeSubflujo, Nivel, Persistencia, TOPE_TIEMPO_MS, ejecutarSubflujo, nivelDelHijo } from './subflujo';
 import { Salida, Servicios, TIPO_LLAMADA, interpolarConfig, nodeType } from './catalog';
 import { MAX_REVIVIDOS, queHacerCon } from './barrido';
 import { nodoRaiz, siguienteNodoId } from './graph';
@@ -250,6 +250,10 @@ export class AutomationsProcessor extends WorkerHost {
       const contextoNodo = { ...contextoPrevio, ajustes: await this.ajustes(run.tenantId) };
       salida = await tipo.handler(interpolarConfig(tipo, nodo.config, contextoNodo), {
         tenantId: run.tenantId,
+        // Sin esto el hijo nacía con `parentNodeId: ''` (43): la unique degeneraba —dos nodos
+        // de llamada en el MISMO padre chocaban entre sí— y la evidencia «vino de este nodo»
+        // salía en blanco. Por eso `nodeId` dejó de ser opcional en `Ejecucion`.
+        nodeId: nodo.id,
         actorUserId: run.automation.actorUserId,
         conversationId: run.conversationId,
         // Los ajustes se mezclan arriba y NO se persisten en `AutomationRun.context`: se
@@ -467,15 +471,16 @@ export class AutomationsProcessor extends WorkerHost {
               vars: argumentos,
             },
             ajustes: await this.ajustes(run.tenantId),
-            nivel: {
-              profundidad: nivel.profundidad + 1,
-              cadena: [...nivel.cadena, automationId],
-              presupuesto: nivel.presupuesto,
-            },
+            // El nivel de QUIEN LLAMA, sin tocar. `problemaAntesDeLlamar` es quien suma el uno
+            // (`cadena.includes(flujo.id)`, `profundidad + 1 > MAX`), así que adelantárselo aquí
+            // hacía que el hijo se encontrara a sí mismo en la cadena y **toda primera llamada**
+            // muriera con «ya está en la cadena de llamadas». Es el contrato que afirma
+            // `subflujo.check.ts` con su `cadena: ['padre']` — solo los antepasados.
+            nivel,
             serviciosPara: (hijoId) =>
               this.servicios(
                 { id: hijoId, tenantId: run.tenantId, conversationId: run.conversationId },
-                { profundidad: nivel.profundidad + 1, cadena: [...nivel.cadena, automationId], presupuesto: nivel.presupuesto },
+                nivelDelHijo(nivel, automationId),
               ),
             persistencia: this.persistenciaDeSubflujo(),
             ahora: () => Date.now(),

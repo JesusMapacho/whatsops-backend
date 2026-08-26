@@ -154,6 +154,23 @@ export function problemaAntesDeLlamar(flujo: FlujoEjecutable, nivel: Nivel): str
 }
 
 /**
+ * El nivel **del hijo**, el que verán SUS nodos cuando llamen a un nieto.
+ *
+ * Existe para que los dos niveles tengan nombre, porque confundirlos ya rompió la feature entera:
+ * `problemaAntesDeLlamar` quiere el del PADRE —suma él el uno— y darle éste hace que el hijo se
+ * encuentre a sí mismo en la cadena, así que **toda primera llamada** moría con «ya está en la
+ * cadena de llamadas». Un `+1` escrito en dos sitios es la forma de volver a hacerlo.
+ */
+export function nivelDelHijo(nivel: Nivel, automationId: string): Nivel {
+  return {
+    profundidad: nivel.profundidad + 1,
+    cadena: [...nivel.cadena, automationId],
+    // El MISMO objeto, no una copia: el presupuesto es del árbol entero.
+    presupuesto: nivel.presupuesto,
+  };
+}
+
+/**
  * Recorre el grafo del hijo hasta el final y devuelve su `vars`.
  *
  * Lanza `ErrorDeSubflujo` si algo lo impide. El padre lo deja subir: su paso queda `failed`,

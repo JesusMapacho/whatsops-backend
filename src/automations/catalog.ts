@@ -122,8 +122,12 @@ export interface Servicios {
 export interface Ejecucion {
   tenantId: string;
   /** El nodo que se está ejecutando. Lo necesita `automation.run` (43): el hijo se identifica
-   *  por `(parentRunId, parentNodeId)`, y ese segundo es este. */
-  nodeId?: string;
+   *  por `(parentRunId, parentNodeId)`, y ese segundo es este.
+   *
+   *  OBLIGATORIO, y el `?` de antes es justo cómo se rompió: el motor era el único de los tres
+   *  sitios que construyen una `Ejecucion` que no lo ponía, y nada se quejó — los hijos nacían
+   *  con `parentNodeId: ''`. Que el compilador lo exija cuesta menos que un check. */
+  nodeId: string;
   /** El admin que activó la automatización. Null = lo borraron; los nodos que necesitan
    *  usuario fallan con un mensaje claro en vez de actuar como cualquiera. */
   actorUserId: string | null;
