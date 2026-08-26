@@ -4,15 +4,15 @@ Un archivo por feature, `NN-slug.md`, plano y sin carpetas de lote: el número o
 lote es metadato. El número es **el de producto**, el mismo que llevan los otros tres
 documentos de la misma feature, así que se cita como «la 42» y basta.
 
-Los otros tres viven en `whatsops-spec` (clónalo como hermano de este repo):
+Los otros tres viven en `GW` (clónalo como hermano de este repo):
 
 | Documento | Dónde | Qué contesta |
 |---|---|---|
-| Producto | `../whatsops-spec/producto/NN-slug.md` | qué no se puede hacer hoy, y para quién |
-| **Contrato** | `../whatsops-spec/contrato/NN-slug.md` | **la frontera**: endpoints, formas, errores, compatibilidad |
+| Producto | `../GW/producto/NN-slug.md` | qué no se puede hacer hoy, y para quién |
+| **Contrato** | `../GW/contrato/NN-slug.md` | **la frontera**: endpoints, formas, errores, compatibilidad |
 | Frontend | `../whatsops-frontend/spec/NN-slug.md` | la pantalla |
 
-**La plantilla y las reglas están en `../whatsops-spec/README.md`.** No se copian aquí: tres
+**La plantilla y las reglas están en `../GW/README.md`.** No se copian aquí: tres
 copias de una plantilla son tres plantillas distintas dentro de un año.
 
 Dos que conviene tener presentes al escribir de este lado:

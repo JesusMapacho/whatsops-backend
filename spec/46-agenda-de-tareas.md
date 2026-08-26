@@ -2,7 +2,7 @@
 
 **Objetivo:** un scope que devuelva los cuatro cubos en una consulta acotada, dos campos más en
 la fila de tarea, y una ruta para deshacer un cierre.
-**Contrato:** `../whatsops-spec/contrato/46-agenda-de-tareas.md` §Formas
+**Contrato:** `../GW/contrato/46-agenda-de-tareas.md` §Formas
 **Depende de:** `crm/tasks.buckets.ts`, `crm/tasks.query.ts`, `crm/tasks.service.ts`.
 **Definición de hecho:** `GET /tasks?scope=agenda` devuelve pendientes de cualquier fecha más
 las cerradas de los últimos siete días del negocio, con las abiertas por delante; cada fila trae

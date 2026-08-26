@@ -2,7 +2,7 @@
 
 **Objetivo:** agregar las ejecuciones de `AutomationRun` en cubos de día natural por flujo, y
 servirlas en una ruta propia.
-**Contrato:** `../whatsops-spec/contrato/45-metricas-de-automatizaciones.md` §Formas
+**Contrato:** `../GW/contrato/45-metricas-de-automatizaciones.md` §Formas
 **Depende de:** `automations/automations.service.ts`, `crm/tasks.buckets.ts`.
 **Definición de hecho:** `GET /automations/metrics` devuelve una entrada por cada
 automatización del tenant —incluidas las que nunca corrieron—, con la serie de N días en la

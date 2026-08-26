@@ -4,8 +4,8 @@ Backend NestJS + Prisma de WhatsOps: la WhatsApp Cloud API (y el transporte por 
 capa gratuita) con multi-tenant, CRM y orquestador detrás.
 
 - **La app** (Angular) vive en su propio repo, `whatsops-frontend`, y se arranca aparte.
-- **El diseño, las specs y el contrato** viven en `whatsops-spec`. Si tienes los tres
-  clonados como hermanos, las referencias relativas de las specs (`../whatsops-spec/…`)
+- **El diseño, las specs y el contrato** viven en `GW`. Si tienes los tres
+  clonados como hermanos, las referencias relativas de las specs (`../GW/…`)
   funcionan tal cual.
 
 ## Arranque local
@@ -82,7 +82,7 @@ end-to-end. La API acepta ese origen por `CORS_ORIGINS`.
 ## WhatsApp por QR (WAHA, capa gratuita v5)
 
 Opcional: solo si quieres probar el transporte no oficial por QR
-(el detalle, en `../whatsops-spec/docs/waha.md`). No necesita nada de Meta.
+(el detalle, en `../GW/docs/waha.md`). No necesita nada de Meta.
 
 ```bash
 docker compose up -d waha
@@ -129,7 +129,7 @@ Requiere en `.env`: `WAHA_URL`, `WAHA_API_KEY`, `WAHA_CALLBACK_URL` y
 > El volumen `wahasessions` guarda el estado de emparejamiento. Si lo borras
 > (`docker compose down -v`) hay que volver a escanear el QR.
 
-Una vez emparejado, la operación se ve en tres sitios (detalle en `../whatsops-spec/docs/waha.md`):
+Una vez emparejado, la operación se ve en tres sitios (detalle en `../GW/docs/waha.md`):
 
 ```bash
 # Estado de las sesiones (gauge de Prometheus)

@@ -5,12 +5,12 @@ Provider**, más un transporte no oficial por QR (WAHA), con un CRM encima del c
 **multi-tenant**.
 
 Este repo es **una capa de dos**. La app Angular vive en `whatsops-frontend` y el diseño,
-las specs y el contrato en `whatsops-spec`. Con los tres clonados como hermanos las
-referencias relativas funcionan: `../whatsops-spec/contrato/NN-slug.md`.
+las specs y el contrato en `GW`. Con los tres clonados como hermanos las
+referencias relativas funcionan: `../GW/contrato/NN-slug.md`.
 
 ## Antes de trabajar
 
-1. **El contrato** (`../whatsops-spec/contrato/NN-*.md`) manda sobre la forma de cualquier
+1. **El contrato** (`../GW/contrato/NN-*.md`) manda sobre la forma de cualquier
    payload que cruce a la app. Si lo que vas a hacer cambia una forma, se edita el contrato
    **primero** y en la misma sesión. Un cambio de forma que no pasó por ahí es un bug de
    proceso, no un atajo.
@@ -18,7 +18,7 @@ referencias relativas funcionan: `../whatsops-spec/contrato/NN-slug.md`.
    restricciones y la verificación. Su «Definición de hecho» tiene que poder comprobarse
    **sin el frontend levantado**; si no se puede, la sección `## Compatibilidad` del contrato
    está mal escrita.
-3. `../whatsops-spec/DDS.md` es el contrato permanente: sesión en cookie, CSRF, alcance por
+3. `../GW/DDS.md` es el contrato permanente: sesión en cookie, CSRF, alcance por
    `tenantId`, forma de error, paginación por cursor. Eso no se repite en cada contrato.
 
 ## Stack
@@ -28,7 +28,7 @@ NestJS (Node/TS) · **PostgreSQL + Prisma** · **Redis + BullMQ** · WebSocket (
 
 ## Principios que no se rompen
 
-De `../whatsops-spec/constitution/constitution.md`; aquí están los que restringen código:
+De `../GW/constitution/constitution.md`; aquí están los que restringen código:
 
 - **Multi-tenant desde el día 1.** Todo dato vive bajo `tenantId`; ninguna query cruza
   tenants. No es una convención: es la propiedad que sostiene el producto.
