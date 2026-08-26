@@ -102,8 +102,15 @@ export interface EntradaSubflujo {
   contexto: Contexto;
   ajustes: Record<string, string>;
   nivel: Nivel;
-  /** Los servicios que verán los nodos del hijo, ya con su propio `flujos` de un nivel más. */
-  servicios: Servicios;
+  /**
+   * Los servicios que verán los nodos del hijo, ya con su `flujos` de un nivel más.
+   *
+   * Es una FÁBRICA y no un objeto porque el hijo necesita su propio `runId` para poder ser padre
+   * de sus nietos, y ese id no existe hasta que `crearOReanudar` corre. Con un objeto hecho de
+   * antemano, un nieto colgaría de un `parentRunId` vacío y la unique de la llamada dejaría de
+   * proteger nada.
+   */
+  serviciosPara: (runId: string) => Servicios;
   persistencia: Persistencia;
   /** Inyectado para poder afirmar el tope de tiempo en el check sin esperar un minuto. */
   ahora: () => number;
@@ -182,6 +189,7 @@ export async function ejecutarSubflujo(e: EntradaSubflujo): Promise<ResultadoSub
     };
   }
 
+  const servicios = e.serviciosPara(hijo.id);
   const { nodes, edges } = e.flujo;
   // Se reanuda por donde iba, igual que `avanzar` con `currentNodeId`.
   let nodo: (NodoMin & { config: unknown }) | null = hijo.currentNodeId
@@ -227,7 +235,7 @@ export async function ejecutarSubflujo(e: EntradaSubflujo): Promise<ResultadoSub
     const previo = await persistencia.pasoPrevio(hijo.id, actual.id);
     if (previo?.status === 'ok') {
       const rama = (previo.output as { rama?: string | null } | null)?.rama ?? null;
-      ctx = conSalidaYVariable(ctx, actual, previo.output ?? null);
+      ctx = conSalidaYVariable(ctx, actual, previo.output ?? null, tipo.variableDe?.(previo.output ?? null));
       nodo = seguir(actual.id, rama);
       await persistencia.avanzarPuntero(hijo.id, nodo?.id ?? null, ctx);
       continue;
@@ -244,7 +252,7 @@ export async function ejecutarSubflujo(e: EntradaSubflujo): Promise<ResultadoSub
         conversationId: e.conversationId,
         nodeId: actual.id,
         contexto: contextoNodo,
-        servicios: e.servicios,
+        servicios,
       });
     } catch (err) {
       const motivo = (err as Error)?.message ?? 'Error desconocido';
@@ -271,7 +279,7 @@ export async function ejecutarSubflujo(e: EntradaSubflujo): Promise<ResultadoSub
     // La config CRUDA en el paso, como el motor y al revés que la simulación: aquí es un run de
     // verdad y su historial tiene que leerse igual que el de cualquier otro.
     await persistencia.registrarPaso(hijo.id, actual.id, 'ok', actual.config, salida.output ?? null, null);
-    ctx = conSalidaYVariable(ctx, actual, salida.output ?? null);
+    ctx = conSalidaYVariable(ctx, actual, salida.output ?? null, tipo.variableDe?.(salida.output ?? null));
     nodo = seguir(actual.id, salida.branch ?? null);
     await persistencia.avanzarPuntero(hijo.id, nodo?.id ?? null, ctx);
   }

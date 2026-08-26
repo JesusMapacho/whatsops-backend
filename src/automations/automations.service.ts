@@ -10,6 +10,7 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { catalogoPublico, interpolarConfig, nodeType, validarConfig, validarTrigger } from './catalog';
 import { problemasDelGrafo } from './graph';
+import { FlujoConocido, idsLlamados, problemasDeLlamadas } from './llamadas';
 import { patronCron } from './triggers';
 import { NOMBRE_VAR, contextoDeMensaje } from './contexto';
 import { entradaSegunTrigger, simular } from './simulacion';
@@ -303,14 +304,25 @@ export class AutomationsService {
         data: { status: 'draft' },
         include: AUTOMATION_INCLUDE,
       });
-      return this.sinToken(apagada);
+      // Quien la llamaba se queda roto: un sub-flujo tiene que estar activo. Se dice DESPUES de
+      // apagarla y no antes —no es una puerta, es un aviso— porque impedir apagar algo por lo
+      // que otro depende de ello deja al operador sin salida.
+      return { ...this.sinToken(apagada), usadaPor: await this.usadaPor(tenantId, a.id) };
     }
 
     // Las funciones inexistentes se dicen AQUÍ y no en ejecución: un filtro mal escrito es un
     // error de configuración, y el sitio donde se dice un error de configuración es la
     // pantalla donde se configura. En ejecución `aplicar` no lanza —devuelve el valor sin
     // transformar— así que sin esta puerta el operador no se enteraría nunca.
-    const problemas = [...problemasDelGrafo(a.nodes, a.edges), ...problemasDeFunciones(a.nodes)];
+    //
+    // Las llamadas a otros flujos van en la misma lista y por el mismo motivo: un bucle
+    // `A → B → A` no da error hasta que corre, y para entonces ya mando mensajes.
+    const flujos = await this.grafoDeLlamadas(tenantId);
+    const problemas = [
+      ...problemasDelGrafo(a.nodes, a.edges),
+      ...problemasDeFunciones(a.nodes),
+      ...problemasDeLlamadas(a.id, idsLlamados(a.nodes), flujos),
+    ];
     if (problemas.length) throw new BadRequestException(problemas.join(' '));
     // Revalida el trigger guardado: pudo entrar cuando el catálogo tenía otra forma.
     const trigger = validarTrigger(a.trigger);
@@ -326,20 +338,63 @@ export class AutomationsService {
 
   async remove(tenantId: string, id: string) {
     const a = await this.get(tenantId, id);
+    // Se calcula ANTES de borrar: despues ya no hay a quien preguntarle quien la llamaba.
+    const usadaPor = await this.usadaPor(tenantId, a.id);
     await this.quitarCron(a.id);
     await this.prisma.automation.delete({ where: { id: a.id } });
-    return { ok: true };
+    return { ok: true, usadaPor };
+  }
+
+  /**
+   * El parentesco de un run, con el NOMBRE del padre dentro y no solo su id (43).
+   *
+   * Con `parentRunId` a secas, la fila del historial tendria que pedir el padre por cada fila
+   * solo para escribir «lanzado por X». Es el mismo motivo por el que `todosLosRuns` ya incluye
+   * `automation: {id, name}`: la pantalla no puede pagar una peticion por fila para una frase.
+   */
+  private static readonly PADRE_INCLUDE = {
+    parent: { select: { id: true, automationId: true, automation: { select: { name: true } } } },
+  } as const;
+
+  private conPadre<T extends { parentRunId: string | null; parentNodeId: string | null; parent?: any }>(run: T) {
+    const { parent, ...resto } = run as any;
+    return {
+      ...resto,
+      parent: parent
+        ? {
+            runId: parent.id,
+            nodeId: run.parentNodeId,
+            automationId: parent.automationId,
+            automationNombre: parent.automation?.name ?? '',
+          }
+        : null,
+    };
+  }
+
+  /** Una ejecucion suelta por id. Es lo que permite entrar al run de un hijo desde el cajon. */
+  async run(tenantId: string, id: string) {
+    const run = await this.prisma.automationRun.findFirst({
+      where: { id, tenantId },
+      include: {
+        automation: { select: { id: true, name: true } },
+        steps: { orderBy: { createdAt: 'asc' } },
+        ...AutomationsService.PADRE_INCLUDE,
+      },
+    });
+    if (!run) throw new NotFoundException('Ejecución no encontrada');
+    return this.conPadre(run);
   }
 
   /** Historial de ejecución: lo que se mira cuando alguien pregunta qué pasó. */
   async runs(tenantId: string, id: string, limit = 20) {
     await this.get(tenantId, id);
-    return this.prisma.automationRun.findMany({
+    const filas = await this.prisma.automationRun.findMany({
       where: { tenantId, automationId: id },
       orderBy: { createdAt: 'desc' },
       take: Math.min(Math.max(Number(limit) || 20, 1), 100),
-      include: { steps: { orderBy: { createdAt: 'asc' } } },
+      include: { steps: { orderBy: { createdAt: 'asc' } }, ...AutomationsService.PADRE_INCLUDE },
     });
+    return filas.map((r) => this.conPadre(r));
   }
 
   /**
@@ -352,15 +407,17 @@ export class AutomationsService {
    * `hookToken`, y devolverla es exactamente lo que `sinToken()` existe para evitar.
    */
   async todosLosRuns(tenantId: string, limit = 30) {
-    return this.prisma.automationRun.findMany({
+    const filas = await this.prisma.automationRun.findMany({
       where: { tenantId },
       orderBy: { createdAt: 'desc' },
       take: Math.min(Math.max(Number(limit) || 30, 1), 100),
       include: {
         automation: { select: { id: true, name: true } },
         steps: { orderBy: { createdAt: 'asc' } },
+        ...AutomationsService.PADRE_INCLUDE,
       },
     });
+    return filas.map((r) => this.conPadre(r));
   }
 
   /**
@@ -377,6 +434,13 @@ export class AutomationsService {
     if (run.status !== 'running' && run.status !== 'waiting') {
       throw new BadRequestException('Esa ejecución ya había terminado.');
     }
+    // Los hijos van detras. Esto NO pasa por `cerrar()` del processor —hace su propio update—
+    // asi que sin esta linea los sub-runs de un run cancelado a mano se quedan colgados, y el
+    // barrido ya no los revive (un hijo nunca se revive suelto).
+    await this.prisma.automationRun.updateMany({
+      where: { parentRunId: run.id, status: { in: ['running', 'waiting'] } },
+      data: { status: 'cortado', error: 'Se canceló el flujo que lo llamó.', currentNodeId: null, waitingConversationId: null },
+    });
     return this.prisma.automationRun.update({
       where: { id: run.id },
       data: {
@@ -417,6 +481,65 @@ export class AutomationsService {
     if (!run) throw new BadRequestException('Ya hay una ejecución en curso para esa conversación.');
     await this.cola.add('run', { runId: run.id });
     return run;
+  }
+
+  // --- composicion de flujos (feature 43) --------------------------------------------------
+
+  /**
+   * El grafo de llamadas del negocio: quien llama a quien, quien espera, y quien esta activa.
+   *
+   * Una sola consulta que alimenta las tres cosas de la 43 —validar al activar, `/llamables`, y
+   * el aviso al desactivar— porque las tres preguntan lo mismo. El alcance va en el `where`,
+   * nunca en un `if` posterior: un sub-flujo es la superficie perfecta para un cruce de tenants.
+   */
+  private async grafoDeLlamadas(tenantId: string): Promise<Map<string, FlujoConocido>> {
+    const filas = await this.prisma.automation.findMany({
+      where: { tenantId },
+      select: { id: true, name: true, status: true, nodes: { select: { type: true, config: true } } },
+    });
+    return new Map(
+      filas.map((f) => [
+        f.id,
+        {
+          nombre: f.name,
+          status: f.status,
+          llama: idsLlamados(f.nodes),
+          // Por el flag del catalogo, que se declara donde se escribe el handler. En EJECUCION
+          // se mira `salida.esperar` por estructura, que coge tambien un nodo cuyo autor se
+          // olvidara de declararlo; `catalog.check.ts` afirma que los dos coinciden.
+          espera: f.nodes.some((n) => nodeType(n.type)?.espera === true),
+        },
+      ]),
+    );
+  }
+
+  /**
+   * Las automatizaciones que se pueden llamar desde esta, y el MOTIVO de las que no.
+   *
+   * Devolver tambien las no elegibles es deliberado: esconderlas deja al operador buscando un
+   * flujo que esta ahi, sin nada que le diga por que no aparece. Misma decision que
+   * `alcanzable: false` en la 47, un nivel mas arriba.
+   */
+  async llamables(tenantId: string, id: string) {
+    await this.get(tenantId, id);
+    const flujos = await this.grafoDeLlamadas(tenantId);
+    return [...flujos.entries()]
+      .filter(([otroId]) => otroId !== id)
+      .map(([otroId, f]) => ({
+        id: otroId,
+        nombre: f.nombre,
+        // Se pregunta «que pasaria si esta automatizacion llamara a esa», que es justo lo que el
+        // operador esta a punto de hacer al elegirla en el desplegable.
+        problema: problemasDeLlamadas(id, [otroId], flujos)[0] ?? null,
+      }));
+  }
+
+  /** Quien llama a esta automatizacion. Para avisar antes de desactivarla o borrarla. */
+  private async usadaPor(tenantId: string, id: string) {
+    const flujos = await this.grafoDeLlamadas(tenantId);
+    return [...flujos.entries()]
+      .filter(([otroId, f]) => otroId !== id && f.llama.includes(id))
+      .map(([otroId, f]) => ({ id: otroId, nombre: f.nombre }));
   }
 
   // --- simulacion en seco (feature 42) ---------------------------------------------------
@@ -529,9 +652,26 @@ export class AutomationsService {
         ? adapter.windowClosedMessage
         : null;
 
+    // Los grafos de los flujos que este llama, precargados: `simular` es puro y no consulta
+    // nada, asi que sin esto un `automation.run` en seco no podria ensenar que hace el hijo — y
+    // probar solo el padre sin ver al hijo es no probar nada.
+    //
+    // Se traen TODOS los del tenant y no solo los alcanzables en un paso: la cadena puede bajar
+    // varios niveles, y una consulta por nivel seria una consulta dentro de un bucle.
+    const subflujos = Object.fromEntries(
+      (
+        await this.prisma.automation.findMany({
+          where: { tenantId },
+          select: { id: true, name: true, status: true, nodes: true, edges: true },
+        })
+      ).map((f) => [f.id, { nombre: f.name, status: f.status, nodes: f.nodes, edges: f.edges }]),
+    );
+
     return simular({
       nodes: a.nodes,
       edges: a.edges,
+      subflujos,
+      cadena: [a.id],
       contexto,
       tenantId,
       actorUserId: a.actorUserId,

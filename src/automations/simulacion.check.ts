@@ -337,6 +337,75 @@ async function main() {
     assert.strictEqual(entradaSegunTrigger('message.inbound', { texto: '' }).texto, '');
   }
 
+  // --- La cadena entera se simula, y se ve de quién es cada paso (43) ----------------------
+  // Probar solo el padre sin ver lo que hace el hijo es no probar nada. Y sin `deFlujo`, los
+  // pasos de los dos se leen como si fueran del mismo grafo.
+  {
+    const llamada: Nodo = {
+      id: 'n1',
+      type: 'automation.run',
+      isRoot: false,
+      config: { automationId: 'b', guardarComo: 'sub', argumentos: [{ nombre: 'quien', ruta: 'contacto.nombre' }] },
+    };
+    const luego: Nodo = { id: 'n2', type: 'message.send', isRoot: false, config: { texto: 'B dijo {{vars.sub.eco}}' } };
+    const aristas: Arista[] = [
+      { fromNodeId: 'n0', toNodeId: 'n1', branch: null },
+      { fromNodeId: 'n1', toNodeId: 'n2', branch: null },
+    ];
+
+    const hijoNodos: Nodo[] = [
+      { id: 'b0', type: 'message.inbound', isRoot: true, config: {} },
+      { id: 'b1', type: 'var.set', isRoot: false, config: { guardarComo: 'eco', valor: 'hola {{vars.quien}}' } },
+    ];
+    const subflujos = {
+      b: { nombre: 'Bienvenida', status: 'active', nodes: hijoNodos, edges: [{ fromNodeId: 'b0', toNodeId: 'b1', branch: null }] },
+    };
+
+    const r = await correr([trigger, llamada, luego], aristas, { subflujos, cadena: ['a'] });
+    assert.strictEqual(r.status, 'done');
+
+    // Los pasos del hijo van detrás del que lo llamó, marcados con su flujo.
+    const delHijo = r.steps.filter((p) => p.deFlujo === 'Bienvenida');
+    assert.strictEqual(delHijo.length, 2, 'el trigger del hijo y su nodo');
+    assert.ok(r.steps.filter((p) => !p.deFlujo).length >= 3, 'y los del padre siguen sin marca');
+
+    // El `vars` del hijo vuelve al padre a secas, no dentro de un sobre: con el sobre, el dato
+    // quedaría en `{{vars.sub.vars.eco}}` y el aplanado del editor no llegaría.
+    const envio = r.steps.find((p) => p.nodeId === 'n2' && !p.deFlujo);
+    assert.strictEqual(envio?.efectos?.[0]?.resumen, 'B dijo hola Ana', 'y los argumentos llegaron');
+
+    // El sobre sí está en el PASO, para poder entrar al run del hijo desde el cajón.
+    const llamado = r.steps.find((p) => p.nodeId === 'n1');
+    assert.strictEqual((llamado?.output as { nombre?: string })?.nombre, 'Bienvenida');
+  }
+
+  // --- Un sub-flujo que espera aborta también en seco --------------------------------------
+  // Si la simulación lo dejara pasar, enseñaría un recorrido que en producción no ocurre.
+  {
+    const llamada: Nodo = { id: 'n1', type: 'automation.run', isRoot: false, config: { automationId: 'b' } };
+    const hijoNodos: Nodo[] = [
+      { id: 'b0', type: 'message.inbound', isRoot: true, config: {} },
+      { id: 'b1', type: 'wait.reply', isRoot: false, config: { horas: 24 } },
+    ];
+    const r = await correr([trigger, llamada], [{ fromNodeId: 'n0', toNodeId: 'n1', branch: null }], {
+      subflujos: { b: { nombre: 'Encuesta', status: 'active', nodes: hijoNodos, edges: [{ fromNodeId: 'b0', toNodeId: 'b1', branch: null }] } },
+      cadena: ['a'],
+    });
+    assert.strictEqual(r.status, 'failed');
+    assert.ok(r.error?.includes('no puede esperar') || r.error?.includes('Encuesta'), r.error ?? '');
+  }
+
+  // --- Un bucle de llamadas se corta también en seco ----------------------------------------
+  {
+    const llamada: Nodo = { id: 'n1', type: 'automation.run', isRoot: false, config: { automationId: 'a' } };
+    const r = await correr([trigger, llamada], [{ fromNodeId: 'n0', toNodeId: 'n1', branch: null }], {
+      subflujos: { a: { nombre: 'Yo misma', status: 'active', nodes: [trigger], edges: [] } },
+      cadena: ['a'],
+    });
+    assert.strictEqual(r.status, 'failed');
+    assert.ok(r.error?.includes('bucle'), r.error ?? '');
+  }
+
   // --- Los dobles devuelven la forma que los handlers LEEN ----------------------------------
   // `message.send` lee `msg?.wamid` y `addNote` lee `nota?.id`. Un doble que devolviera
   // `undefined` haría que el contexto final de la simulación no se pareciera al de producción,

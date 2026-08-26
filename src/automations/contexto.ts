@@ -171,11 +171,19 @@ export function conSalida(ctx: Contexto, nodeId: string, salida: unknown): Conte
  * que no es el que va a pasar en producción, que es la mentira que la feature existe para
  * evitar.
  */
-export function conSalidaYVariable(ctx: Contexto, nodo: { id: string; config: unknown }, output: unknown): Contexto {
+export function conSalidaYVariable(
+  ctx: Contexto,
+  nodo: { id: string; config: unknown },
+  output: unknown,
+  /** Lo que va a `vars.<nombre>` si no es lo mismo que la salida del paso. Solo lo usa
+   *  `automation.run`; el porqué está en `Salida.variable`. */
+  variable?: unknown,
+): Contexto {
   const config = (nodo.config ?? {}) as Record<string, unknown>;
   const conNodo = conSalida(ctx, nodo.id, output);
   const nombre = config.guardarComo;
-  let fuera = typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, output) : conNodo;
+  const valor = variable === undefined ? output : variable;
+  let fuera = typeof nombre === 'string' && nombre ? conVariable(conNodo, nombre, valor) : conNodo;
 
   // 47: `campos` nombra trozos de la salida para que el resto del flujo diga `{{vars.saldo}}`
   // en vez de `{{vars.api.json.data.0.account.balance}}`. Va AQUÍ y no en el handler del nodo

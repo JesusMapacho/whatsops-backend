@@ -16,7 +16,8 @@ import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
 import { Contexto, conSalidaYVariable } from './contexto';
-import { Salida, Servicios, interpolarConfig, nodeType } from './catalog';
+import { ErrorDeSubflujo, Nivel, Persistencia, TOPE_TIEMPO_MS, ejecutarSubflujo } from './subflujo';
+import { Salida, Servicios, TIPO_LLAMADA, interpolarConfig, nodeType } from './catalog';
 import { MAX_REVIVIDOS, queHacerCon } from './barrido';
 import { nodoRaiz, siguienteNodoId } from './graph';
 import { patronCron } from './triggers';
@@ -74,6 +75,7 @@ export class AutomationsProcessor extends WorkerHost {
         vecesRevivido: true,
         currentNodeId: true,
         automationId: true,
+        parentRunId: true,
       },
       // Tope: si algo se descontroló, mejor barrer 200 por tick que traerse la tabla entera.
       take: 200,
@@ -83,7 +85,7 @@ export class AutomationsProcessor extends WorkerHost {
     const cuenta = { revividos: 0, cortados: 0, sinRespuesta: 0 };
 
     for (const run of vivos) {
-      const accion = queHacerCon(run, ahora);
+      const accion = queHacerCon({ ...run, esHijo: run.parentRunId !== null }, ahora);
       if (accion === 'nada') continue;
       try {
         if (accion === 'revivir') {
@@ -237,7 +239,7 @@ export class AutomationsProcessor extends WorkerHost {
       // reencaminara por la salida por defecto, un reintento podría irse por la rama
       // equivocada, que en este motor significa mandarle otra cosa a un cliente.
       const rama = (previo.output as { rama?: string | null } | null)?.rama ?? null;
-      return this.continuar(run, edges, nodo.id, rama, conSalidaYVariable(contextoPrevio, nodo, previo.output ?? null));
+      return this.continuar(run, edges, nodo.id, rama, conSalidaYVariable(contextoPrevio, nodo, previo.output ?? null, tipo.variableDe?.(previo.output ?? null)));
     }
 
     let salida: Salida;
@@ -255,7 +257,7 @@ export class AutomationsProcessor extends WorkerHost {
         // los runs que ya están a mitad de camino. Y es un solo sitio, en vez de los tres
         // que crean runs (crearRun, dispararCron y el entrante).
         contexto: contextoNodo,
-        servicios: this.servicios(),
+        servicios: this.servicios(run, { profundidad: 0, cadena: [run.automationId], presupuesto: { subRuns: 0, nodos: 0, hastaMs: Date.now() + TOPE_TIEMPO_MS } }),
       });
     } catch (e) {
       const error = (e as Error)?.message ?? 'Error desconocido';
@@ -270,7 +272,7 @@ export class AutomationsProcessor extends WorkerHost {
     }
 
     await this.registrarPaso(run, nodo.id, 'ok', nodo.config, salida.output ?? null, null);
-    const contexto = conSalidaYVariable(contextoPrevio, nodo, salida.output ?? null);
+    const contexto = conSalidaYVariable(contextoPrevio, nodo, salida.output ?? null, tipo.variableDe?.(salida.output ?? null));
 
     // Espera por RESPUESTA: el run se aparca y lo reanuda el próximo entrante de esa
     // conversación (`trigger-on-inbound.ts`).
@@ -359,6 +361,13 @@ export class AutomationsProcessor extends WorkerHost {
         ...(contexto ? { context: contexto as any } : {}),
       },
     });
+    // Los hijos vivos se van con el padre. Un sub-run abortado se deja `running` a propósito
+    // —para que un reintento del padre lo reanude— pero si el padre termina de verdad, ese
+    // «a propósito» se convierte en un run colgado que el barrido ya no va a revivir.
+    await this.prisma.automationRun.updateMany({
+      where: { parentRunId: run.id, status: { in: ['running', 'waiting'] } },
+      data: { status: 'cortado', error: 'El flujo que lo llamó terminó antes.', currentNodeId: null, waitingConversationId: null },
+    });
     this.emitir(run.tenantId, run.id, status);
   }
 
@@ -404,12 +413,132 @@ export class AutomationsProcessor extends WorkerHost {
     return Object.fromEntries(filas.map((f) => [f.name, f.value]));
   }
 
-  private servicios(): Servicios {
+  /**
+   * Los servicios que ve un nodo. `flujos` es una CLAUSURA sobre el nivel: cada sub-flujo
+   * construye para sus propios nodos un `Servicios` con un nivel más, así que la profundidad y
+   * la cadena de llamadas viajan en la pila en vez de consultarse — el árbol entero vive dentro
+   * de un job, y esa invariante la sostiene el barrido, que nunca revive a un hijo suelto.
+   *
+   * `presupuesto` es UN objeto compartido por todo el árbol, no uno por padre: por padre los
+   * topes se multiplicarían por nivel.
+   */
+  private servicios(run: { id: string; tenantId: string; conversationId: string | null }, nivel: Nivel): Servicios {
     return {
       messaging: this.messaging,
       conversations: this.conversations,
       deals: this.deals,
       tasks: this.tasks,
+      flujos: {
+        ejecutar: async (automationId, ej, argumentos) => {
+          const flujo = await this.prisma.automation.findFirst({
+            // El alcance en el `where` y no en un `if` posterior: un sub-flujo es la superficie
+            // perfecta para un cruce de tenants si el id viniera del cliente.
+            where: { id: automationId, tenantId: run.tenantId },
+            include: { nodes: true, edges: true },
+          });
+          if (!flujo) {
+            throw new ErrorDeSubflujo('El flujo que este nodo quiere ejecutar ya no existe.');
+          }
+          return ejecutarSubflujo({
+            flujo: {
+              id: flujo.id,
+              nombre: flujo.name,
+              status: flujo.status,
+              actorUserId: flujo.actorUserId,
+              nodes: flujo.nodes,
+              edges: flujo.edges,
+            },
+            tenantId: run.tenantId,
+            // El del PADRE, nunca el de la automatización hija: llamar a un flujo no puede ser
+            // una forma de hacer lo que el actor no podría hacer directamente.
+            actorUserId: ej.actorUserId,
+            conversationId: run.conversationId,
+            parentRunId: run.id,
+            parentNodeId: ej.nodeId ?? '',
+            // Lo que hereda: la conversación y quién escribe. Lo que NO hereda: las `vars` del
+            // padre. Un sub-flujo cuya conducta dependiera de quién lo llama no es un
+            // procedimiento — su interfaz son sus `argumentos` y nada más.
+            contexto: {
+              mensaje: ej.contexto.mensaje ?? { texto: '', wamid: null },
+              contacto: ej.contexto.contacto ?? { id: null, nombre: null, waId: null },
+              conversacion: ej.contexto.conversacion ?? { id: run.conversationId },
+              disparador: { tipo: TIPO_LLAMADA, desdeRunId: run.id, desdeNodeId: ej.nodeId ?? null },
+              nodos: {},
+              vars: argumentos,
+            },
+            ajustes: await this.ajustes(run.tenantId),
+            nivel: {
+              profundidad: nivel.profundidad + 1,
+              cadena: [...nivel.cadena, automationId],
+              presupuesto: nivel.presupuesto,
+            },
+            serviciosPara: (hijoId) =>
+              this.servicios(
+                { id: hijoId, tenantId: run.tenantId, conversationId: run.conversationId },
+                { profundidad: nivel.profundidad + 1, cadena: [...nivel.cadena, automationId], presupuesto: nivel.presupuesto },
+              ),
+            persistencia: this.persistenciaDeSubflujo(),
+            ahora: () => Date.now(),
+          });
+        },
+      },
+    };
+  }
+
+  /** La base del hijo, por fuera de `subflujo.ts` para que su check corra sin Postgres. */
+  private persistenciaDeSubflujo(): Persistencia {
+    return {
+      crearOReanudar: async (d) => {
+        // Ya existe = un reintento del padre. Se devuelve tal cual y el recorrido lo REANUDA:
+        // es lo que la unique `(parentRunId, parentNodeId)` existe para dar.
+        const previo = await this.prisma.automationRun.findUnique({
+          where: { parentRunId_parentNodeId: { parentRunId: d.parentRunId, parentNodeId: d.parentNodeId } },
+        });
+        if (previo) {
+          return {
+            id: previo.id,
+            status: previo.status,
+            currentNodeId: previo.currentNodeId,
+            context: (previo.context ?? {}) as Contexto,
+          };
+        }
+        const fila = await this.prisma.automationRun.create({
+          data: {
+            tenantId: d.tenantId,
+            automationId: d.automationId,
+            conversationId: d.conversationId,
+            parentRunId: d.parentRunId,
+            parentNodeId: d.parentNodeId,
+            context: d.contexto as any,
+          },
+        });
+        return { id: fila.id, status: fila.status, currentNodeId: fila.currentNodeId, context: d.contexto };
+      },
+      pasoPrevio: async (runId, nodeId) => {
+        const p = await this.prisma.automationRunStep.findUnique({ where: { runId_nodeId: { runId, nodeId } } });
+        return p ? { status: p.status, output: p.output } : null;
+      },
+      registrarPaso: async (runId, nodeId, status, input, output, error) => {
+        const run = await this.prisma.automationRun.findUnique({ where: { id: runId }, select: { tenantId: true } });
+        if (!run) return;
+        await this.prisma.automationRunStep.upsert({
+          where: { runId_nodeId: { runId, nodeId } },
+          create: { tenantId: run.tenantId, runId, nodeId, status, input: input as any, output: output as any, error },
+          update: { status, input: input as any, output: output as any, error },
+        });
+      },
+      avanzarPuntero: async (runId, nodeId, contexto) => {
+        await this.prisma.automationRun.update({
+          where: { id: runId },
+          data: { currentNodeId: nodeId, context: contexto as any },
+        });
+      },
+      cerrar: async (runId, status, error, contexto) => {
+        await this.prisma.automationRun.update({
+          where: { id: runId },
+          data: { status, error, currentNodeId: null, context: contexto as any },
+        });
+      },
     };
   }
 

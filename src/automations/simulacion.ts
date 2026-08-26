@@ -22,6 +22,7 @@
 import { Salida, Servicios, interpolarConfig, nodeType } from './catalog';
 import { Contexto, VariableVista, conSalidaYVariable } from './contexto';
 import { AristaMin, NodoMin, nodoRaiz, siguienteNodoId } from './graph';
+import { MAX_PROFUNDIDAD as SUB_MAX_PROFUNDIDAD } from './subflujo';
 
 /** Lo que un nodo HABRÍA hecho. Es la mitad del valor de la feature: `resumen` va ya
  *  interpolado, que es donde se ve que `{{vars.mi campo}}` iba a salir vacío. */
@@ -55,6 +56,10 @@ export interface PasoSimulado {
   error: string | null;
   createdAt: string;
   efectos: Efecto[];
+  /** El sub-flujo del que salió este paso, si no es del flujo que se está simulando (43).
+   *  Ausente = es de éste. Es lo que hace la cadena legible: probar solo el padre sin ver lo
+   *  que hace el hijo es no probar nada. */
+  deFlujo?: string;
   /** Qué le pasó a cada `{{...}}` de la config. En pantalla `Hola ` y `Hola` son
    *  indistinguibles: sin esto el operador no puede saber si ahí había una variable. */
   variables: VariableVista[];
@@ -97,6 +102,11 @@ export interface EntradaSimulacion {
   /** Por qué un envío real NO saldría hoy (la ventana de 24 h), o null. Se calcula una vez
    *  fuera: la ventana es una propiedad de la conversación, no de cada nodo. */
   frenoEnvio: string | null;
+  /** Los grafos de los flujos llamables, precargados por el servicio: la simulación es pura y
+   *  no consulta nada. Sin esto, un `automation.run` en seco no podría enseñar qué hace. */
+  subflujos?: Record<string, { nombre: string; status: string; nodes: NodoConConfig[]; edges: AristaMin[] }>;
+  /** La cadena de llamadas, para cortar la recursión igual que en producción. */
+  cadena?: string[];
 }
 
 /**
@@ -138,7 +148,13 @@ function corto(v: unknown, max = 120): string {
  * `conversation.addNote` lee `nota?.id`, y un doble que devolviera `undefined` haría que el
  * contexto final de la simulación no se pareciera al de producción.
  */
-export function dobles(registro: Efecto[], frenoEnvio: string | null): Servicios {
+export function dobles(
+  registro: Efecto[],
+  frenoEnvio: string | null,
+  /** Cómo se simula una llamada a otro flujo. Lo inyecta `simular`, que es quien puede
+   *  recursar; el doble no sabe hacerlo solo. */
+  llamar?: (automationId: string, argumentos: Record<string, unknown>) => Promise<{ vars: Record<string, unknown>; nombre: string }>,
+): Servicios {
   const nota = (servicio: string, metodo: string, resumen: string, argumentos: unknown, bloqueado?: string) => {
     registro.push({ servicio, metodo, resumen, argumentos, ...(bloqueado ? { bloqueado } : {}) });
   };
@@ -191,6 +207,14 @@ export function dobles(registro: Efecto[], frenoEnvio: string | null): Servicios
         const titulo = (body as { title?: string } | null)?.title ?? '';
         nota('tasks', 'create', `Crearía la tarea ${corto(titulo)}`, body);
         return { id: 'sim-task' };
+      },
+    },
+    flujos: {
+      async ejecutar(automationId, ej, argumentos) {
+        if (!llamar) throw new Error('No se puede simular una llamada a otro flujo aquí.');
+        const r = await llamar(automationId, argumentos);
+        nota('flujos', 'ejecutar', `Ejecutaría «${r.nombre}»`, { automationId, argumentos });
+        return { runId: 'simulacion', automationId, nombre: r.nombre, status: 'done', vars: r.vars };
       },
     },
   };
@@ -257,6 +281,9 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
     }
 
     const contextoNodo = { ...ctx, ajustes: e.ajustes };
+    // Los pasos del sub-flujo, que se cuelan en la lista justo detrás del paso que lo llamó:
+    // así la cadena se lee de arriba abajo, que es lo único que la hace útil.
+    const pasosDelHijo: PasoSimulado[] = [];
     const vistas: VariableVista[] = [];
     const config = interpolarConfig(tipo, actual.config, contextoNodo, vistas);
     // Sin repetidas: la misma ruta escrita dos veces en el mismo nodo es un aviso, no dos.
@@ -315,12 +342,47 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
         // reventar con «este nodo necesita una conversación».
         conversationId: e.conversationId ?? 'conversacion-simulada',
         contexto: contextoNodo,
-        servicios: dobles(efectos, e.frenoEnvio),
+        servicios: dobles(efectos, e.frenoEnvio, async (automationId, argumentos) => {
+          const sub = e.subflujos?.[automationId];
+          if (!sub) throw new Error('El flujo que este nodo quiere ejecutar no está disponible.');
+          const cadena = e.cadena ?? [];
+          // Las mismas dos guardas que en producción, y por el mismo motivo: una simulación que
+          // no las respetara enseñaría un recorrido que no puede ocurrir.
+          if (cadena.includes(automationId)) throw new Error(`«${sub.nombre}» ya está en la cadena: sería un bucle.`);
+          if (cadena.length + 1 > SUB_MAX_PROFUNDIDAD) throw new Error(`La cadena de llamadas pasa de ${SUB_MAX_PROFUNDIDAD} niveles.`);
+
+          const hijo = await simular({
+            ...e,
+            nodes: sub.nodes,
+            edges: sub.edges,
+            cadena: [...cadena, automationId],
+            // Lo mismo que hereda en producción: la conversación y quién escribe, nunca las
+            // `vars` del padre. Su interfaz son sus argumentos.
+            contexto: {
+              mensaje: ctx.mensaje ?? { texto: '', wamid: null },
+              contacto: ctx.contacto ?? { id: null, nombre: null, waId: null },
+              conversacion: ctx.conversacion ?? { id: e.conversationId },
+              disparador: { tipo: 'automation.run', desdeFlujo: automationId },
+              nodos: {},
+              vars: argumentos,
+            },
+          });
+          pasosDelHijo.push(...hijo.steps.map((p) => ({ ...p, deFlujo: sub.nombre })));
+          // Un sub-flujo que no termina es un fallo, igual que en producción: no hay dónde
+          // aparcar una llamada, así que una espera dentro del hijo aborta al padre.
+          if (hijo.status !== 'done') {
+            throw new Error(
+              hijo.error ?? `«${sub.nombre}» no llega al final: un sub-flujo no puede esperar.`,
+            );
+          }
+          return { vars: (hijo.context.vars ?? {}) as Record<string, unknown>, nombre: sub.nombre };
+        }),
       });
     } catch (err) {
       error = (err as Error)?.message ?? 'Error desconocido';
       status = 'failed';
       steps.push(paso('failed', null, error));
+      steps.push(...pasosDelHijo);
       break;
     }
 
@@ -388,13 +450,14 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
       // La respuesta entra al contexto igual que la repone `trigger-on-inbound.ts:57` al
       // reanudar un run de verdad: por `mensaje.texto`, que es lo que miran los comparadores
       // de después. Y se sigue por la salida por defecto, como `automations.processor.ts:288`.
-      ctx = conSalidaYVariable({ ...ctx, mensaje: { texto: respuesta, wamid: null } }, actual, salida.output ?? null);
+      ctx = conSalidaYVariable({ ...ctx, mensaje: { texto: respuesta, wamid: null } }, actual, salida.output ?? null, tipo.variableDe?.(salida.output ?? null));
       nodo = seguir(actual.id, null);
       continue;
     }
 
     steps.push(paso('ok', salida.output ?? null, null));
-    ctx = conSalidaYVariable(ctx, actual, salida.output ?? null);
+    steps.push(...pasosDelHijo);
+    ctx = conSalidaYVariable(ctx, actual, salida.output ?? null, tipo.variableDe?.(salida.output ?? null));
     nodo = seguir(actual.id, salida.branch ?? null);
   }
 

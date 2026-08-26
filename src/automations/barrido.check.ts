@@ -18,7 +18,7 @@ const enMs = (ms: number) => new Date(AHORA.getTime() + ms);
 /** Un run vivo cualquiera; cada assert cambia solo lo suyo. */
 const run = (x: Partial<Parameters<typeof queHacerCon>[0]>) =>
   queHacerCon(
-    { status: 'running', updatedAt: AHORA, reanudarEn: null, caducaEn: null, vecesRevivido: 0, ...x },
+    { status: 'running', updatedAt: AHORA, reanudarEn: null, caducaEn: null, vecesRevivido: 0, esHijo: false, ...x },
     AHORA,
   );
 
@@ -50,7 +50,7 @@ assert.strictEqual(
   'gastados los tres, fuera: un run que muere siempre se re-encolaría en bucle',
 );
 assert.strictEqual(
-  run({ updatedAt: haceMs(SIN_SENAL_MS + 1), vecesRevivido: 99 }),
+  run({ updatedAt: haceMs(SIN_SENAL_MS + 1), vecesRevivido: 99, esHijo: false }),
   'cortar',
   'y por encima del tope, igual',
 );
@@ -121,5 +121,26 @@ for (const status of ['done', 'failed', 'cortado']) {
   );
 }
 assert.strictEqual(run({ status: 'inventado', updatedAt: haceMs(1e9) }), 'nada', 'un estado que no conoce, quieto');
+
+
+// --- Un HIJO nunca se revive suelto (43) -------------------------------------------------
+// Es la guarda que sostiene la composición entera: el árbol vive dentro de UN job y la cadena
+// de llamadas viaja en su pila. Revivir a un hijo por su cuenta lo sacaría del árbol —sin
+// profundidad, sin presupuesto, sin cadena— y, si el padre sigue vivo, habría dos workers
+// dentro del mismo hijo mandando el mismo mensaje.
+{
+  const muerto = { status: 'running', updatedAt: haceMs(SIN_SENAL_MS + 1000), reanudarEn: null, caducaEn: null, vecesRevivido: 0, esHijo: true };
+  assert.strictEqual(queHacerCon(muerto, AHORA), 'cortar', 'un hijo sin señal se corta, no se revive');
+  // El MISMO run como primer nivel da lo contrario: ahí revivir es lo correcto. Es lo que fija
+  // que la diferencia la hace el parentesco y no otra cosa del fixture.
+  assert.strictEqual(queHacerCon({ ...muerto, esHijo: false }, AHORA), 'revivir');
+
+  // Con señal reciente se deja en paz: su padre está trabajando dentro de él ahora mismo.
+  assert.strictEqual(queHacerCon({ ...muerto, updatedAt: haceMs(1000) }, AHORA), 'nada');
+
+  // Un hijo no debería poder estar aparcado —un sub-flujo no espera— pero si aparece uno, no se
+  // toca: reanimarlo sería inventarle un padre.
+  assert.strictEqual(queHacerCon({ ...muerto, status: 'waiting', reanudarEn: haceMs(999999) }, AHORA), 'nada');
+}
 
 console.log('barrido.check OK');

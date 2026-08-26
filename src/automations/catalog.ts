@@ -16,7 +16,7 @@ import { TRIGGERS } from './triggers';
 
 // --- Contrato ----------------------------------------------------------------------
 
-export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion' | 'codigo' | 'campos';
+export type TipoCampo = 'string' | 'texto' | 'number' | 'boolean' | 'json' | 'opcion' | 'codigo' | 'campos' | 'flujo';
 
 export interface Campo {
   tipo: TipoCampo;
@@ -35,6 +35,13 @@ export interface Campo {
    * Solo hay que ponerlo en las excepciones; `modoRutas()` deriva el resto.
    */
   rutas?: ModoRutas;
+  /**
+   * De dónde saca las sugerencias un campo `campos` (43 y 47). Hermano de `rutas`, y **no se
+   * deriva**: el mismo control sirve a las rutas del sondeo de ese nodo (`sondeo`) y a las del
+   * contexto del padre (`contexto`), y adivinarlo por el tipo de nodo es la clase de regla
+   * implícita que después nadie encuentra.
+   */
+  fuente?: 'sondeo' | 'contexto';
 }
 
 /**
@@ -90,6 +97,25 @@ export interface Servicios {
   };
   tasks: {
     create(t: string, body: unknown, userId: string, role: string): Promise<any>;
+  };
+  /**
+   * Llamar a otra automatización y esperar su resultado (43).
+   *
+   * Va por aquí y no con un `if (nodo.type === 'automation.run')` dentro del motor por lo mismo
+   * que todo lo demás: es el único punto de sustitución del módulo. Y tiene un efecto que no se
+   * ve a simple vista — **añadir esta clave rompe la compilación de `dobles()`** hasta que se le
+   * dé contraparte, así que la propiedad que protege `simulacion.check.ts` («ningún tipo de nodo
+   * consigue un efecto externo en seco») se extiende a las llamadas sin escribir un check nuevo.
+   *
+   * El precedente contrario ya duele: `http.request` NO pasa por aquí, y por eso hay que
+   * interceptarlo a mano en el recorrido en seco.
+   */
+  flujos: {
+    ejecutar(
+      automationId: string,
+      ej: Ejecucion,
+      argumentos: Record<string, unknown>,
+    ): Promise<{ runId: string; automationId: string; nombre: string; status: string; vars: Record<string, unknown> }>;
   };
 }
 
@@ -159,6 +185,37 @@ export interface NodeType {
   descripcion: string;
   configSchema: ConfigSchema;
   handler?: (config: any, ej: Ejecucion) => Promise<Salida>;
+  /**
+   * Qué va a `{{vars.<nombre>}}`, si no es la salida del paso tal cual. Por defecto son la misma
+   * cosa, y para 23 de los 24 tipos lo siguen siendo.
+   *
+   * Existe por `automation.run` (43), donde las dos preguntas se separan de verdad: el PASO
+   * guarda `{runId, nombre, status}` para poder entrar al run del hijo desde el cajón, y la
+   * VARIABLE trae el `vars` del hijo a secas — con el sobre, el dato quedaría en
+   * `{{vars.x.vars.total}}`, y el aplanado del editor topa la profundidad en 3, así que todo lo
+   * anidado dentro desaparecería del autocompletado (`contrato/43 §1`).
+   *
+   * Va aquí y NO en `Salida` porque tiene que servir también al camino de reintento: cuando un
+   * paso ya salió `ok`, el motor reutiliza su `output` guardado y no vuelve a llamar al handler,
+   * así que una decisión que viviera en la salida se perdería justo ahí — y la variable acabaría
+   * con el sobre dentro solo en los reintentos, que es el peor sitio donde tener una diferencia.
+   *
+   * Consecuencia declarada: para ese nodo, `nodos.<id>` (el sobre) y `vars.<nombre>` (el
+   * contenido) dejan de ser el mismo valor. A propósito: uno es lo que pasó, el otro es lo que
+   * el operador pidió.
+   */
+  variableDe?: (output: unknown) => unknown;
+  /**
+   * Este nodo aparca el run. Se declara donde se escribe el handler y no en una lista suelta,
+   * para que un tipo nuevo que espere lo diga en el mismo sitio en que lo implementa.
+   *
+   * Lo usan las guardas ESTÁTICAS de la 43 (el desplegable de `/llamables` y la activación): un
+   * sub-flujo no puede esperar, porque la llamada es síncrona dentro del paso del padre. En
+   * EJECUCIÓN no se mira este flag sino `salida.esperar`, por estructura — así coge también un
+   * nodo futuro cuyo autor se olvidara de declararlo. `catalog.check.ts` afirma que los dos
+   * coinciden, que es lo que impide que el olvido pase inadvertido.
+   */
+  espera?: true;
   /** No ofrecer «Guardar el resultado como»: este nodo no produce nada que nombrar. */
   sinSalida?: boolean;
 }
@@ -177,6 +234,27 @@ function actor(ej: Ejecucion): string {
     );
   }
   return ej.actorUserId;
+}
+
+/**
+ * Los `argumentos` de una llamada, resueltos contra el contexto del PADRE.
+ *
+ * Misma forma que el `campos` de la 47 —pares nombre → ruta— y misma lectura con `valorDe`, que
+ * es lo que bloquea `constructor` y la cadena de prototipos: aquí la ruta la escribe el operador.
+ *
+ * Una ruta que no resuelve entra como `null` y no se omite: omitirla haría que `{{vars.x}}` del
+ * hijo saliera LITERAL en vez de vacío, que es el aviso equivocado.
+ */
+export function argumentosDe(config: unknown, ctx: Contexto): Record<string, unknown> {
+  const lista = (config as Record<string, unknown> | null)?.argumentos;
+  if (!Array.isArray(lista)) return {};
+  const out: Record<string, unknown> = {};
+  for (const raw of lista) {
+    const par = (raw ?? {}) as { nombre?: unknown; ruta?: unknown };
+    if (typeof par.nombre !== 'string' || !par.nombre || typeof par.ruta !== 'string') continue;
+    out[par.nombre] = valorDe(ctx, par.ruta) ?? null;
+  }
+  return out;
 }
 
 function conversacion(ej: Ejecucion): string {
@@ -542,7 +620,38 @@ export const NODE_TYPES: NodeType[] = [
     },
   },
   {
+    key: TIPO_LLAMADA,
+    label: 'Ejecutar flujo',
+    category: 'accion',
+    descripcion:
+      'Llama a otra automatización del negocio, espera a que termine y deja su resultado en ' +
+      '«Guardar el resultado como». El flujo llamado no puede tener nodos de espera.',
+    configSchema: {
+      // `sinInterpolar` NO es un detalle: si el id admitiera `{{...}}`, el texto que escribe un
+      // cliente elegiría qué flujo se ejecuta. No se cierra validando en ejecución — se cierra
+      // no dejándolo ser una plantilla.
+      automationId: { tipo: 'flujo', label: 'Flujo a ejecutar', requerido: true, sinInterpolar: true },
+      argumentos: {
+        tipo: 'campos',
+        label: 'Datos que recibe',
+        fuente: 'contexto',
+        sinInterpolar: true,
+        ayuda: 'El flujo llamado NO ve tus variables: solo estas. Es su interfaz.',
+      },
+    },
+    // El sobre va al PASO (para poder entrar al run del hijo) y el `vars` del hijo a la
+    // VARIABLE. El porqué medido, en `variableDe` y en `contrato/43 §1`.
+    variableDe: (output) => (output as { vars?: unknown } | null)?.vars ?? {},
+    handler: async (config, ej) => {
+      const id = idDeLlamada(config);
+      if (!id) throw new Error('Este nodo no tiene ningún flujo elegido.');
+      const r = await ej.servicios.flujos.ejecutar(id, ej, argumentosDe(config, ej.contexto));
+      return { output: r };
+    },
+  },
+  {
     key: 'wait.delay',
+    espera: true,
     label: 'Esperar',
     category: 'accion',
     descripcion: 'Pausa el run y lo retoma pasado el tiempo indicado.',
@@ -559,6 +668,7 @@ export const NODE_TYPES: NodeType[] = [
   },
   {
     key: 'wait.reply',
+    espera: true,
     label: 'Esperar respuesta',
     category: 'accion',
     descripcion:
@@ -751,6 +861,13 @@ export function validarConfig(key: string, config: unknown): Record<string, unkn
       // 47: pares «nombre → ruta». Se valida entero aquí y no en el handler por el mismo
       // motivo que todo lo demás: un nombre malo no puede descubrirse en ejecución, cuando ya
       // no hay nadie mirando la pantalla donde se configuró.
+      // Un id de automatización. No se comprueba aquí que exista ni que sea del tenant: eso
+      // necesita la base, y vive en `problemasDeLlamadas` (al activar) y en `subflujo.ts` (al
+      // ejecutar). Aquí solo se afirma la forma.
+      case 'flujo':
+        if (typeof v !== 'string') throw new BadRequestException(`${tipo.label}: «${def.label}» tiene que ser un id`);
+        out[campo] = v;
+        break;
       case 'campos': {
         if (!Array.isArray(v)) throw new BadRequestException(`${tipo.label}: «${def.label}» tiene que ser una lista`);
         const pares = v.map((raw) => {

@@ -1043,7 +1043,9 @@ model AutomationNode {
   automation Automation       @relation(fields: [automationId], references: [id], onDelete: Cascade)
   from       AutomationEdge[] @relation("EdgeFrom")
   to         AutomationEdge[] @relation("EdgeTo")
-  steps      AutomationRunStep[]
+  // Ya NO hay `steps`: `AutomationRunStep.nodeId` dejo de ser una FK en la 43, porque su
+  // cascada borraba el historial de pasos cada vez que alguien guardaba el grafo. El porque
+  // completo, en `AutomationRunStep`.
 
   @@index([automationId])
   @@index([tenantId])
@@ -1106,16 +1108,35 @@ model AutomationRun {
   // impide repetir un paso, asi que un mensaje no sale dos veces), pero sin tope un run que
   // muere siempre se re-encolaria en bucle.
   vecesRevivido Int @default(0)
+  // QUIEN LLAMO A ESTE RUN (43). Null en todo run de primer nivel, que son todos los que
+  // existen hasta esta feature.
+  //
+  // La unique de abajo es la IDEMPOTENCIA DE LA LLAMADA, hermana de `(runId, nodeId)`: un
+  // reintento del padre encuentra el run del hijo en vez de crear otro, asi que no manda sus
+  // mensajes dos veces. En Postgres dos NULL no colisionan, o sea que los runs de primer nivel
+  // no se estorban — la misma propiedad de la que ya vive `(tenantId, waitingConversationId)`.
+  parentRunId  String?
+  parentNodeId String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   tenant     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   automation Automation          @relation(fields: [automationId], references: [id], onDelete: Cascade)
   steps      AutomationRunStep[]
+  // Borrar A borra sus runs, y con ellos los sub-runs que A provoco en B. La alternativa
+  // (`SetNull`) deja huerfanos que la pantalla pinta como runs normales de B, y eso es peor que
+  // no tenerlos: la evidencia «este mensaje salio porque A llamo a B», sin A, no prueba nada.
+  parent   AutomationRun?  @relation("SubRuns", fields: [parentRunId], references: [id], onDelete: Cascade)
+  subRuns  AutomationRun[] @relation("SubRuns")
 
   @@unique([tenantId, waitingConversationId])
+  @@unique([parentRunId, parentNodeId])
   @@index([tenantId, status])
   @@index([automationId])
+  @@index([parentRunId])
+  // Pendiente desde la 45 con su `ponytail:` escrito, y esta es la feature que multiplica las
+  // filas: cada llamada anade un run mas.
+  @@index([tenantId, createdAt])
 }
 
 // Log de ejecución: una fila por nodo ejecutado. Es lo que se mira cuando alguien pregunta
@@ -1131,9 +1152,17 @@ model AutomationRunStep {
   error    String?
   createdAt DateTime  @default(now())
 
-  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  run    AutomationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
-  node   AutomationNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  run    AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  // `nodeId` es un String PELADO y ya no una FK a `AutomationNode` (43). La tenia con
+  // `onDelete: Cascade`, y `guardarGrafo` borra y recrea TODOS los nodos en cada guardado: o
+  // sea que guardar el grafo borraba en silencio los pasos de todas las ejecuciones
+  // anteriores. Nadie lo notaba porque no daba error — el historial viejo simplemente aparecia
+  // sin pasos.
+  //
+  // El precio, declarado en `contrato/43`: un paso puede apuntar a un nodo que ya no esta en el
+  // grafo actual, y la pantalla tiene que decirlo en vez de dejar el titulo en blanco. Perder
+  // el historial es mucho peor.
 
   // La idempotencia del motor: un reintento de BullMQ choca aquí en vez de repetir el
   // efecto (mandar el mensaje dos veces).

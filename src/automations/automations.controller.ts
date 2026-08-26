@@ -134,6 +134,17 @@ export class AutomationsController {
     return this.automations.sondear(user.tenantId, id, body);
   }
 
+  // Que flujos se pueden llamar desde este, y el MOTIVO de los que no (feature 43). Los no
+  // elegibles viajan tambien: esconderlos deja al operador buscando un flujo que esta ahi.
+  //
+  // ANTES de `automations/:id/runs` no hace falta —son rutas distintas— pero se deja junto a sus
+  // hermanas del mismo `:id` para que se lean seguidas.
+  @Get('automations/:id/llamables')
+  @RequirePermissions('automations:manage')
+  llamables(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.automations.llamables(user.tenantId, id);
+  }
+
   @Get('automations/:id/runs')
   @RequirePermissions('automations:manage')
   runs(@CurrentUser() user: AuthUser, @Param('id') id: string, @Query('limit') limit?: string) {
@@ -150,6 +161,14 @@ export class AutomationsController {
 
   // Desbloquear a mano lo que el barrido tardaría en recoger. Mismo permiso: cancelar un run
   // es menos invasivo que desactivar la automatización, que ya va con este.
+  // Una ejecucion suelta. Nace con la 43: hasta ahora solo se podian pedir las ultimas N de UNA
+  // automatizacion, asi que no habia forma de abrir el run de un hijo, que es de otra.
+  @Get('automation-runs/:id')
+  @RequirePermissions('automations:manage')
+  unRun(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.automations.run(user.tenantId, id);
+  }
+
   @Post('automation-runs/:id/cancel')
   @RequirePermissions('automations:manage')
   cancelarRun(@CurrentUser() user: AuthUser, @Param('id') id: string) {

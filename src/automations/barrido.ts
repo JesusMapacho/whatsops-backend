@@ -26,6 +26,20 @@ export interface RunParaBarrer {
   /** Cuándo se le acaba la paciencia, si está esperando que contesten. */
   caducaEn: Date | null;
   vecesRevivido: number;
+  /**
+   * Es un sub-run: lo lanzó otro run dentro de su propio paso (43).
+   *
+   * Un hijo NUNCA se revive suelto, y esa es la guarda que sostiene toda la composición: el
+   * árbol entero vive dentro de UN job, y la profundidad y la cadena de llamadas viajan en la
+   * pila de ese job, no en la base. Revivirlo por su cuenta lo sacaría del árbol —profundidad
+   * cero, sin presupuesto, sin cadena— y la guarda de recursión se evaporaría. Peor: su padre
+   * puede seguir vivo, y entonces habría dos workers dentro del mismo hijo.
+   *
+   * Si un hijo se quedó sin señal, lo que hay que hacer es cortarlo: su padre lo va a reanudar
+   * por la unique `(parentRunId, parentNodeId)` cuando BullMQ reintente, o va a morir y
+   * arrastrarlo.
+   */
+  esHijo: boolean;
 }
 
 /**
@@ -54,6 +68,13 @@ export const MAX_REVIVIDOS = 3;
 /** Qué hacer con este run, ahora. No toca nada: solo decide. */
 export function queHacerCon(run: RunParaBarrer, ahora: Date): Accion {
   const t = ahora.getTime();
+
+  // Antes que nada: un hijo no se revive nunca. Va arriba y no dentro del `running` porque la
+  // regla es del parentesco, no del estado — y un hijo aparcado tampoco tiene sentido.
+  if (run.esHijo) {
+    if (run.status === 'running' && t - run.updatedAt.getTime() <= SIN_SENAL_MS) return 'nada';
+    return run.status === 'running' ? 'cortar' : 'nada';
+  }
 
   if (run.status === 'running') {
     // Se compara contra `updatedAt`, y eso da el frenado gratis: revivir es un UPDATE, así que

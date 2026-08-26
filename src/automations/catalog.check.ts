@@ -140,4 +140,43 @@ assert.strictEqual(modoRutas(GUARDAR_COMO), null, 'en un nombre no se sugieren r
 assert.strictEqual(modoRutas(nodeType('wait.delay')!.configSchema.minutos), null, 'un number no lleva rutas');
 assert.strictEqual(modoRutas(nodeType('logic.condition')!.configSchema.operador), null, 'un desplegable tampoco');
 
-console.log('catalog.check OK');
+// --- el flag `espera` no se puede olvidar (43) --------------------------------------------
+// Las guardas ESTÁTICAS de la 43 —el desplegable de `/llamables` y la activación— preguntan por
+// `tipo.espera` para saber si un flujo se puede llamar. La guarda de EJECUCIÓN pregunta por
+// `salida.esperar`, por estructura. Si los dos dejan de coincidir, un sub-flujo que espera pasa
+// las dos primeras puertas y muere en la tercera, en producción, a mitad de una conversación.
+//
+// Lo que esto atrapa es el olvido: alguien añade un nodo que aparca el run y no declara el flag.
+{
+  const dobles = require('./simulacion').dobles as (r: unknown[], f: null) => unknown;
+  const ctxMinimo = { mensaje: { texto: 'x' }, contacto: { id: 'c' }, conversacion: { id: 'v' }, nodos: {}, vars: {}, ajustes: {} };
+  const ej = { tenantId: 't', actorUserId: 'u', conversationId: 'v', nodeId: 'n', contexto: ctxMinimo, servicios: dobles([], null) };
+
+  Promise.all(
+    NODE_TYPES.filter((t) => t.handler).map(async (t) => {
+      let salida: { esperar?: unknown } | null = null;
+      try {
+        salida = await t.handler!(interpolarConfig(t, {}, ctxMinimo as never), ej as never);
+      } catch {
+        // Un handler que necesita config de verdad no se puede juzgar con la vacía. Los dos que
+        // esperan hoy —`wait.delay` y `wait.reply`— tienen valores por defecto, así que sí se
+        // juzgan; el día que uno espere y además exija configuración, este check deja de verlo.
+        // ponytail: techo conocido. Camino: darle a cada tipo una config de ejemplo en el
+        // catálogo, que además serviría para la biblioteca de recetas.
+        return;
+      }
+      assert.strictEqual(
+        !!salida?.esperar,
+        !!t.espera,
+        `${t.key}: el flag \`espera\` y lo que devuelve el handler no coinciden`,
+      );
+    }),
+  ).then(
+    () => console.log('catalog.check OK'),
+    (e) => {
+      console.error(e);
+      process.exit(1);
+    },
+  );
+}
+
