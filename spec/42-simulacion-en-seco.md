@@ -194,7 +194,7 @@ porque nadie sabe por qué está.
 ## Verificación
 
 1. `npx ts-node src/automations/simulacion.check.ts` → `simulacion.check.ts OK`.
-2. `npm run check` → 57/57. `npm run build` limpio.
+2. `npm run check` → 60/60. `npm run build` limpio.
 3. Con la base levantada, cargar el grafo de prueba:
 
    ```bash
@@ -242,4 +242,22 @@ porque nadie sabe por qué está.
    correcto es que `bloqueado` **no** aparezca — no es un fallo.
 8. **`wait.delay` de 30 días reporta 10080 min, no 43200.** No es un error: el catálogo topa la
    espera en 7 días (`TOPE_ESPERA_MIN`), y en seco se ve el valor **topado**, que es el que va a
+   ocurrir.
+
+### Firmado contra base el 2026-08-26 — los puntos 3 a 8, 8 de 8
+
+Los contadores del punto 4 salieron **idénticos** antes y después de seis simulaciones:
+`1709 | 1 | 13 | 8 | 22 | 7` (msgs, deals, tasks, runs, pasos, acts). Es la única prueba que vale
+para «no salió nada»; que el `status` diga `simulado: true` no prueba nada por sí solo.
+
+Los cinco casos del punto 5 salieron con las frases citadas arriba, textuales, incluido el
+`bloqueado` de `seed42-sinrama` — que viaja en el **efecto** del paso, no en el paso. El
+`wait.delay` llegó con `input: {minutos: 43200}` y `output: {minutos: 10080}`, que es el punto 8
+visible en la misma respuesta.
+
+El punto 7 se comprobó y **no** apareció `bloqueado`, que es lo correcto: la única conexión del
+tenant es WAHA (`enforcesWindow: false`). No es un fallo y no se apunta como pendiente.
+
+El punto 6 se firmó con un tenant registrado a propósito (`QA Aislamiento`): `simular`, `sondear`,
+`run`, `deactivate`, `GET /automations/:id` y `llamables` sobre ids de CMA → **404 los ocho**.
    ocurrir.

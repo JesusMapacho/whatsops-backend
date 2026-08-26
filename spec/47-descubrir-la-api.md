@@ -182,7 +182,7 @@ que va con enmienda.
 1. `npx ts-node src/automations/sondeo.check.ts` → `sondeo.check.ts OK`. Y
    `contexto.check.ts`, que es donde se afirma `campos`: es el único sitio donde la salida de
    un nodo se convierte en variables, y lo comparten el motor y la simulación.
-2. `npm run check` → 58/58. `npm run build` limpio.
+2. `npm run check` → 60/60. `npm run build` limpio.
 3. Con la base levantada, cargar el fixture:
 
    ```bash
@@ -195,27 +195,63 @@ que va con enmienda.
    42 a propósito — aquel está citado textualmente en su verificación, y meterle un nodo más
    invalidaría esas frases.
 
-4. Sobre `seed47-auto` (verificado el 2026-08-25, 12 de 12):
-   - Sin `guardarComo` → 400: «Ponle nombre al resultado antes de sondear».
-   - **SSRF, las cinco**: `http://127.0.0.1:3000/health`, `http://169.254.169.254/…`,
-     `http://[::1]/`, `http://10.0.0.1/` y `file:///etc/passwd` → las cinco con `estado: 0`,
-     `rutas: []` y motivo. Las cuatro primeras dicen «apunta a una dirección interna o
-     reservada»; la quinta, «solo http:// o https://».
-   - Un host que no resuelve → `estado: 0` con el motivo nombrando el host, **no un 500**.
-   - La URL se interpola **antes** de validar y llamar: la plantilla ya no aparece en el error.
+4. Sobre `seed47-auto`, los doce de la primera pasada (2026-08-25) y **re-corridos el
+   2026-08-26**: sin `guardarComo` → 400; los cinco SSRF; el host que no resuelve; la URL
+   interpolada antes de validar; `campos` en seco; `vars.api.json` entero; cero filas; y el 404
+   de otro tenant. El detalle de cada uno está en los puntos 5 y 6, que es donde se firmaron con
+   la base y la red arriba.
+
+5. **Con red, firmado el 2026-08-26.** Hasta aquí todas las pruebas fallaban **antes** del
+   `fetch` —a propósito, para no depender de una API ajena—, así que el camino feliz estaba
+   cubierto solo por `sondeo.check.ts` sobre objetos. Ya no.
+
+   Ningún servidor local sirve para esto y **eso es el diseño**: `assertSafeOutboundUrl` resuelve
+   el host y rechaza toda IP privada, así que un `localhost` de pruebas es indistinguible del
+   SSRF que la guarda existe para parar. Las fixtures son APIs públicas.
+
+   Primero los rechazos, que son los que no pueden fallar:
+
+   | Caso | URL | Salió |
+   |---|---|---|
+   | los cuatro SSRF directos | `127.0.0.1:3000`, `169.254.169.254`, `[::1]`, `10.0.0.1` | `estado: 0`, `rutas: []`, «apunta a una dirección interna o reservada» |
+   | esquema | `file:///etc/passwd` | `estado: 0`, «solo http:// o https://» |
+   | **DNS que resuelve a privada** | `http://localtest.me/` (→ `127.0.0.1`) | `estado: 0`, mismo motivo — se juzga la IP, no el nombre |
+   | **pública que redirige a privada** | `httpbin.org/redirect-to?url=http://169.254.169.254/` | `estado: 302`, `ok: false`, «no sigue redirecciones» |
+   | 302 pelado | `httpbin.org/status/302` | igual |
+   | host que no resuelve | `api.ejemplo.invalid` | `estado: 0` nombrando el host, **no un 500** |
+
+   Y después el camino feliz, que es lo que no tenía ninguna cobertura contra red:
+
+   | Caso | URL | Salió |
+   |---|---|---|
+   | 2xx con JSON | `httpbin.org/json` | `ok: true`, cuatro rutas reales, `deLista: true` en `slideshow.slides`, `respuesta` entera |
+   | `truncado: 'rutas'` | un PR de `api.github.com` | `ok: true`, exactamente 200 rutas (`MAX_RUTAS`) |
+   | `truncado: 'profundidad'` | `.../repos/nestjs/nest/branches/master` | `ok: true`, 60 rutas, `commit.commit.author` cortado como `objeto` |
+   | **caso 3 del contrato** | `api.github.com/users/octocat/orgs` (`[]`) | `estado: 200`, **`ok: true`**, `rutas: []` |
+   | no-2xx con cuerpo | `api.github.com/user` | `estado: 401`, **`ok: false`**, `rutas: []`, `cuerpo` con el recorte |
+   | cuerpo no-JSON | `httpbin.org/html` | `estado: 200`, `ok: false`, `cuerpo` con el HTML, **sin** `respuesta` |
+
+   Las dos filas del medio son **la** prueba de que el caso 3 no se colapsa con el 401: las dos
+   traen `rutas: []` y solo `ok` las distingue. Es el desglose que este contrato peleó.
+
+6. Y lo que ya estaba, revisado otra vez con la base arriba:
+   - Sin `guardarComo` → 400 «Ponle nombre al resultado antes de sondear».
+   - La URL se interpola **antes** de validar: con `{{contacto.waId}}` vacío, el error nombra el
+     host resuelto y la plantilla ya no aparece; el hueco viaja en `variables` como `vacia`.
    - **`campos` en seco** (contrato §8): simular con
      `httpRespuestas: { 'seed47-n1': { data: [{ saldo: 1234 }], cliente: { nombre: 'Leticia' } } }`
-     deja el último paso en `Tu saldo es 1234, Leticia.` **Esa es la prueba de que la costura
+     dejó el último paso en `Tu saldo es 1234, Leticia.` **Esa es la prueba de que la costura
      está bien elegida**: no hubo que tocar el processor para que funcione en seco.
-   - Y `vars.api.json` sigue entero: `campos` **añade** nombres, no los sustituye.
-   - El sondeo no crea ninguna fila, contadas antes y después.
+   - Y `vars.api.json` sigue entero: las claves quedaron en `['api', 'quien', 'saldo']`, o sea
+     que `campos` **añade** nombres, no los sustituye.
+   - El sondeo no creó ninguna fila: `7 | 19 | 1709` (runs, pasos, msgs) antes y después.
    - Con el `tenantId` de otro tenant → 404.
 
-5. **Lo que NO se pudo verificar aquí y queda dicho**: una llamada que llegue a contestar.
-   Todas las pruebas de arriba fallan antes del `fetch` —a propósito, para no depender de una
-   API ajena—, así que el camino feliz (rutas reales, `truncado`, `respuesta`) está cubierto
-   por `sondeo.check.ts` sobre objetos, no contra una API de verdad. La primera pasada con
-   red debe mirar eso, más el 302 (que no se sigue) y un 401 con cuerpo HTML.
+7. **Lo que sigue sin verificarse.** Un 401 cuyo cuerpo sea **HTML** en una sola llamada: no
+   encontré un endpoint público estable que lo dé, así que la afirmación va partida en dos
+   —`api.github.com/user` pone el 401 con `cuerpo`, `httpbin.org/html` pone el recorte de HTML— y
+   las dos mitades están firmadas. Lo que falta es verlas juntas, que es un caso de forma, no de
+   código: `cuerpo` sale del mismo `crudo.slice(0, 2000)` en los dos.
 
 ## El orden de despliegue, que no es el habitual
 

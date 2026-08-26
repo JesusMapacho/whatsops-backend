@@ -145,32 +145,102 @@ Sin base — es lo que compra el bucle propio:
 5. `catalog.check.ts` → el flag `espera` y lo que devuelve cada handler coinciden.
 6. `npm run check` → **60/60**. `npm run build` limpio.
 
-Con base (`prisma/sql/seed-43-subflujos.sql`) — **PENDIENTE: no se pudo correr**, ver abajo:
+Con base (`prisma/sql/seed-43-subflujos.sql`) — **firmado el 2026-08-26**, 9 de 9:
 
-7. Aplicar la migración: `npx prisma migrate deploy` (o el `psql -f` del archivo).
-8. `POST /automations/seed43-padre/run` con una conversación: sale
-   `El flujo llamado dijo: Hola <nombre>, soy el sub-flujo`, y hay **dos** filas en
-   `AutomationRun`, la segunda con `parentRunId` de la primera.
-9. Padre e hijo en la misma conversación **sin chocar** con `(tenantId, waitingConversationId)`.
-10. Matar el proceso a mitad del hijo y reencolar: **cero mensajes duplicados**, y el hijo se
-    reanuda desde su `currentNodeId`. Es la prueba de la unique nueva, y la única que la prueba.
-11. Activar `seed43-ciclo` → 400 con «se llama a sí misma».
-12. Activar `seed43-espera` y volver a disparar al padre apuntándolo: la guarda de **ejecución**
-    para al padre con el nombre del nodo de espera.
-13. `GET /automations/seed43-padre/llamables` trae `seed43-espera` **con su frase**, no lo
-    esconde. Y no trae flujos de otro tenant.
-14. `POST /automations/seed43-hijo/deactivate` contesta con `usadaPor: [{id: 'seed43-padre'}]`.
-15. Editar el grafo de `seed43-padre` y volver a mirar un run anterior: **sus pasos siguen ahí**.
+7. `npx prisma migrate deploy` aplicó `20260826120000_ejecutar_flujo`, que era la única
+   pendiente (la base venía de `20260821120000_segundo_factor_plataforma`).
+
+**Primero lo que solo la base puede decir**, en una transacción con `ROLLBACK`, y salió bien
+las tres veces:
+
+- La unique `(parentRunId, parentNodeId)` rechaza el segundo hijo del mismo `(padre, nodo)`
+  con `23505`. Y sus dos propiedades hermanas, que son las que la hacen usable en vez de
+  romperlo todo: dos runs de primer nivel (los dos con `NULL`) **no** chocan, y el mismo nodo
+  bajo **otro** padre sí entra.
+- La FK auto-referencial: con padre → hijo → nieto y un paso en cada uno, borrar la
+  **automatización** se llevó los cinco runs y los tres pasos por `CASCADE`, sin error.
+- `AutomationRunStep` ya solo tiene `runId_fkey` y `tenantId_fkey`: la FK a `AutomationNode`
+  no está.
+
+8. `POST /automations/seed43-padre/run` → salió `El flujo llamado dijo: Hola QA Yo Mismo, soy
+   el sub-flujo` (mensaje `sent` de verdad, por WAHA), y hay **dos** filas en `AutomationRun`:
+   la segunda con `parentRunId` de la primera y `parentNodeId = 'seed43-p1'`.
+
+   El contacto de prueba se creó a mano y se retiró después, porque WAHA está emparejado con un
+   número real y un run de verdad **manda un WhatsApp de verdad**: `Contact` con el `waId` del
+   propio número emparejado y `Conversation` sobre la conexión WAHA del tenant, las dos con
+   `platform: 'waha'`. Ese último campo no es un detalle: con el `'whatsapp'` que pone el
+   `DEFAULT` de la columna, `channelAdapter` elige el adaptador de Cloud API y el envío muere
+   con «Token de acceso inválido» sin que nada diga que el transporte era el equivocado.
+9. Padre e hijo en la misma conversación, los dos vivos a la vez, sin chocar con
+   `(tenantId, waitingConversationId)`.
+10. **La prueba de la unique nueva.** El hijo tarda milisegundos, así que matar el proceso a
+    mitad no se puede cronometrar: se dejó la base **en el estado exacto que ese crash deja**
+    —el hijo entero, y del padre borrado el paso del nodo de llamada con `updatedAt` a 11 min
+    (`SIN_SENAL_MS` son 10)— y se dejó que el barrido lo reviviera solo. Resultado: **un** hijo,
+    el mismo id y el mismo `createdAt`, y sus pasos **con su hora original** — no se re-ejecutó,
+    se reanudó. `vecesRevivido` pasó a 1.
+11. Activar `seed43-ciclo` → 400 «se llama a sí misma», con el ciclo dibujado.
+12. La guarda de **ejecución**, que es la que esta feature necesita y no la de activación: con
+    el padre **ya activo** se le cambió el nodo por debajo para que apuntara a `seed43-espera`
+    (la carrera de dos admins que la spec describe). El run murió con «tiene un nodo de espera
+    («Esperar respuesta») y una llamada no puede esperar», y el hijo que había quedado suelto
+    lo cerró el barrido como `cortado` con «El flujo que lo llamó terminó antes».
+    Por el camino se firmó también la guarda **estática**: con `seed43-espera` ya activa,
+    activar al padre da el mismo mensaje.
+13. `GET /automations/seed43-padre/llamables` trae `seed43-espera` **con su frase**, y las de
+    otro tenant no salen.
+14. `POST /automations/seed43-hijo/deactivate` → `usadaPor: [{id: 'seed43-padre'}]`.
+15. Con 11 pasos de runs viejos del padre, se **guardó el grafo** (`PUT .../graph`, que borra y
+    recrea todos los nodos con ids nuevos) y los 11 **siguen ahí**, los 11 apuntando ya a nodos
+    que no existen. Es el arreglo silencioso de la migración medido **después** del acto que lo
+    rompía, no antes.
+
+## Dos bugs que solo apareció al correrlo, y los dos estaban en el mismo sitio
+
+Los 60 checks pasaban y el motor no funcionaba. Los dos vivían en el **cableado** de
+`automations.processor.ts`, que es justo lo que ningún check alcanza —necesita Nest, Postgres y
+Redis—, y los dos los encontró el punto 8 a la primera.
+
+**1. Toda primera llamada moría con «ya está en la cadena de llamadas».** El motor le pasaba a
+`problemaAntesDeLlamar` el nivel **del hijo** (`cadena: [...cadena, automationId]`), y esa guarda
+suma el uno ella misma (`cadena.includes(flujo.id)`), así que el hijo se encontraba a sí mismo.
+`subflujo.check.ts` afirma el contrato contrario con su `cadena: ['padre']` —solo antepasados— y
+por eso pasaba: el error no estaba en el módulo. El `+1` estaba escrito en dos sitios; ahora
+está en uno, con nombre: `nivelDelHijo()`, y el check afirma la diferencia entre los dos niveles.
+
+**2. Todos los hijos nacían con `parentNodeId: ''`.** `Ejecucion.nodeId` era opcional y el motor
+era el único de los tres sitios que construyen una que no lo ponía (`subflujo.ts` y
+`simulacion.ts` sí). Con eso la unique degeneraba —dos nodos de llamada en el **mismo** padre
+habrían chocado entre sí— y la evidencia «vino de este nodo» salía en blanco. `nodeId` dejó de
+ser opcional: lo exige el compilador, que cuesta menos que un check.
+
+El frontend sacó el segundo el mismo día por otro camino —una pantalla donde un padre que llama
+a dos sub-flujos ejecutaba el primero dos veces— y el orquestador lo confirmó en la base: tres
+hijos, los tres con `parentNodeId` vacío. Dos caminos distintos, el mismo día, y **ninguno de los
+dos fue un check**.
+
+**El límite conocido de `npm run check`, dicho aquí porque es donde se cobró:** los 60 checks
+cubren decisiones puras y no llegan al **cableado** — `automations.processor.ts` necesita Nest,
+Postgres y Redis, así que lo único que lo prueba es correrlo. Los dos bugs eran de cableado, no
+de lógica: un argumento pasado con un `+1` de más, y un campo que nadie ponía. Lo que sí se puede
+hacer desde un check es **quitarle sitios a la duda**, y es lo que se hizo: el `+1` ahora tiene
+nombre y el campo lo exige el compilador.
+
+**`parent: null` en `/simular`** (enmienda de `contrato/43 §La ejecución`, 26 ago 2026): la
+respuesta de la simulación se arma en `simulacion.ts` y no pasa por `conPadre`, así que el campo
+llegaba **ausente**. Va `null` y no opcional porque un run real de primer nivel ya manda `null`:
+admitir la ausencia dejaría dos codificaciones de «no tiene padre» y tres estados en pantalla
+para una pregunta de dos casos. `simulacion.check.ts` lo afirma.
 
 ## Lo que NO está verificado, y por qué
 
-**Nada de lo que necesita base.** Docker estaba parado cuando se terminó esto —el usuario había
-bajado los servidores—, así que **la migración no se ha aplicado ni una vez** y los puntos 7 a 15
-están sin correr. Lo que hay es: el esquema valida (`npx prisma validate`), el cliente se
-regenera, el proyecto compila y los 60 checks pasan.
+**La carrera de verdad.** El punto 10 reproduce el ESTADO que deja un proceso muerto, no dos
+workers empujando a la vez sobre la unique. Para eso hacen falta dos réplicas del backend contra
+el mismo Redis, y aquí solo hay una. Lo que la unique impide está firmado; lo que no se ha visto
+es a Postgres arbitrando entre dos escritores simultáneos.
 
-Eso deja sin comprobar, en concreto, lo que solo la base puede decir: que la unique
-`(parentRunId, parentNodeId)` de verdad impide el segundo hijo, que la FK auto-referencial con
-`CASCADE` no rompe el borrado de una automatización, y que retirar la FK de
-`AutomationRunStep.nodeId` no deja ninguna consulta huérfana. **La primera pasada con la base
-arriba tiene que empezar por ahí**, no por el camino feliz.
+**El mensaje duplicado no se puede ver desde el hijo**, porque `seed43-hijo` solo hace `var.set`
+y no manda nada. Lo que el punto 10 afirma es lo equivalente y observable: que el hijo se
+**reanuda** en vez de recrearse, con sus pasos intactos.
+
