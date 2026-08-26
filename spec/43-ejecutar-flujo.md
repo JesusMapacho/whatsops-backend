@@ -138,8 +138,10 @@ Sin base — es lo que compra el bucle propio:
 2. `llamadas.check.ts` → auto-llamada, A→B→A, A→B→C→A, profundidad estática, id inexistente,
    borrador, flujo que espera, y un grafo sano que no dice nada.
 3. `barrido.check.ts` → un hijo sin señal se **corta**; el mismo run como primer nivel se revive.
-4. `simulacion.check.ts` → la cadena entera se simula con los pasos del hijo marcados `deFlujo`;
-   un sub-flujo que espera aborta también en seco; un bucle también.
+4. `simulacion.check.ts` → la cadena entera se simula con los pasos del hijo marcados
+   `deFlujo: {nombre, automationId}` y con su `tipo` —que solo viaja en ellos, porque el editor
+   no tiene el grafo del hijo y sin eso la fila sale con el título en blanco—; un sub-flujo que
+   espera aborta también en seco; un bucle también.
 5. `catalog.check.ts` → el flag `espera` y lo que devuelve cada handler coinciden.
 6. `npm run check` → **60/60**. `npm run build` limpio.
 

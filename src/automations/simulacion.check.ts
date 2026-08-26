@@ -365,9 +365,15 @@ async function main() {
     assert.strictEqual(r.status, 'done');
 
     // Los pasos del hijo van detrás del que lo llamó, marcados con su flujo.
-    const delHijo = r.steps.filter((p) => p.deFlujo === 'Bienvenida');
+    const delHijo = r.steps.filter((p) => p.deFlujo?.nombre === 'Bienvenida');
     assert.strictEqual(delHijo.length, 2, 'el trigger del hijo y su nodo');
     assert.ok(r.steps.filter((p) => !p.deFlujo).length >= 3, 'y los del padre siguen sin marca');
+    // El id además del nombre: desde un paso del hijo se puede abrir ESE flujo.
+    assert.strictEqual(delHijo[0].deFlujo?.automationId, 'b');
+    // Y su `tipo`, porque el editor no tiene el grafo del hijo y sin esto la fila sale con el
+    // título en blanco. Solo en los pasos del hijo: los del padre los resuelve él.
+    assert.deepStrictEqual(delHijo.map((p) => p.tipo), ['message.inbound', 'var.set']);
+    assert.ok(r.steps.filter((p) => !p.deFlujo).every((p) => p.tipo === undefined), 'los propios no lo llevan');
 
     // El `vars` del hijo vuelve al padre a secas, no dentro de un sobre: con el sobre, el dato
     // quedaría en `{{vars.sub.vars.eco}}` y el aplanado del editor no llegaría.

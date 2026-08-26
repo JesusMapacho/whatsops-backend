@@ -56,10 +56,29 @@ export interface PasoSimulado {
   error: string | null;
   createdAt: string;
   efectos: Efecto[];
-  /** El sub-flujo del que salió este paso, si no es del flujo que se está simulando (43).
-   *  Ausente = es de éste. Es lo que hace la cadena legible: probar solo el padre sin ver lo
-   *  que hace el hijo es no probar nada. */
-  deFlujo?: string;
+  /**
+   * El sub-flujo del que salió este paso, si no es del flujo que se está simulando (43).
+   * Ausente = es de éste. Es lo que hace la cadena legible: probar solo el padre sin ver lo que
+   * hace el hijo es no probar nada.
+   *
+   * Lleva el `automationId` además del nombre para que desde un paso del hijo se pueda **abrir
+   * ese flujo**: simulo, veo que el sub-flujo hace algo raro, entro y lo arreglo. Con el nombre
+   * a secas habría que pedir la lista entera solo para traducirlo a un id.
+   */
+  deFlujo?: { nombre: string; automationId: string };
+  /**
+   * La key del catálogo de este nodo. **Solo viaja en los pasos que traen `deFlujo`.**
+   *
+   * En la 42 se decidió que `tipo` NO viajara, y esa regla no cambia — cambia si se cumple su
+   * condición. Allí el motivo era que el editor ya lo resuelve del grafo y con cambios sin
+   * guardar el panel diría una cosa y el lienzo otra: dos fuentes que pueden discrepar. Para un
+   * paso del hijo el editor **no tiene ninguna fuente** —no tiene ese grafo cargado— así que no
+   * hay con qué discrepar, y sin esto la fila sale con el título en blanco.
+   *
+   * Va la KEY y no la etiqueta: el nombre lo resuelve el editor con el catálogo que ya tiene, y
+   * así las etiquetas siguen teniendo una sola fuente.
+   */
+  tipo?: string;
   /** Qué le pasó a cada `{{...}}` de la config. En pantalla `Hola ` y `Hola` son
    *  indistinguibles: sin esto el operador no puede saber si ahí había una variable. */
   variables: VariableVista[];
@@ -367,7 +386,15 @@ export async function simular(e: EntradaSimulacion): Promise<Simulacion> {
               vars: argumentos,
             },
           });
-          pasosDelHijo.push(...hijo.steps.map((p) => ({ ...p, deFlujo: sub.nombre })));
+          // `tipo` se resuelve aquí, donde SÍ se tiene el grafo del hijo, y solo para sus pasos.
+          const tipoDe = (nodeId: string) => sub.nodes.find((n) => n.id === nodeId)?.type;
+          pasosDelHijo.push(
+            ...hijo.steps.map((p) => ({
+              ...p,
+              deFlujo: p.deFlujo ?? { nombre: sub.nombre, automationId },
+              tipo: p.tipo ?? tipoDe(p.nodeId),
+            })),
+          );
           // Un sub-flujo que no termina es un fallo, igual que en producción: no hay dónde
           // aparcar una llamada, así que una espera dentro del hijo aborta al padre.
           if (hijo.status !== 'done') {
