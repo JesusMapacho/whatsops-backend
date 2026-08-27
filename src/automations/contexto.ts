@@ -47,6 +47,26 @@ export function valorDe(ctx: Contexto, ruta: string): unknown {
 }
 
 /**
+ * Una ruta CRUDA (sin llaves) que admite la misma tubería de funciones que `{{...}}`:
+ * `vars.lista | cuenta`, `vars.items | campo:"nombre" | unir:", "`. Si no parsea, se resuelve
+ * como ruta pelada — que es lo que se hacía antes y no rompe nada guardado.
+ *
+ * **Vive aquí y no en `comparadores.ts`, que es de donde viene.** La usan tres sitios —el
+ * «Campo» de `logic.condition`, el `campos` de la 47 y el `argumentos` de `flow.call`— y los
+ * tres tienen que resolver igual. Con dos copias de esta regla, la primera vez que alguien
+ * retoque una se separan y el operador se encuentra con que la misma tubería funciona en un
+ * campo y no en el de al lado. La dirección de dependencias ya era esta: `comparadores.ts`
+ * importa de aquí, y aquí ya se importaba `parseExpresion`.
+ *
+ * `valorDe` sigue siendo quien recorre la ruta, así que el filtro de `claveSegura` no se
+ * esquiva por este camino: `vars.api.constructor` sigue sin resolver.
+ */
+export function valorDelCampo(ctx: Contexto, campo: string): unknown {
+  const e = parseExpresion(campo);
+  return e ? aplicar(valorDe(ctx, e.ruta), e.funciones) : valorDe(ctx, campo);
+}
+
+/**
  * Qué le pasó a cada `{{...}}` de un texto. Existe para la simulación en seco (feature 42):
  * en pantalla `Hola ` y `Hola` son indistinguibles, así que sin esto el operador no puede
  * saber si ahí había una variable que se resolvió a nada.
@@ -195,8 +215,13 @@ export function conSalidaYVariable(
   // salida dentro, por eso se resuelven contra `fuera` y no contra `ctx`. Así no hace falta
   // lógica de prefijo en ninguna capa: el argumento entero, en `contrato/47 §2`.
   //
-  // `valorDe` y no un acceso a mano: es lo que bloquea `constructor` y la cadena de
-  // prototipos, y aquí la ruta la escribe el operador.
+  // `valorDelCampo` y no un acceso a mano: por dentro es `valorDe`, que es lo que bloquea
+  // `constructor` y la cadena de prototipos, y aquí la ruta la escribe el operador.
+  //
+  // Y `valorDelCampo` y no `valorDe` pelado (§16): el editor autocompleta tuberías en las filas
+  // de un campo `campos` —lo hace por tipo, no por nodo— así que sin esto una fila con
+  // `vars.x | cuenta` no casaba ninguna clave, salía `undefined`, y el `?? null` de abajo la
+  // dejaba en `null` sin que nada lo dijera. El editor sugería algo que el motor tiraba.
   const campos = config.campos;
   if (Array.isArray(campos)) {
     for (const raw of campos) {
@@ -205,7 +230,7 @@ export function conSalidaYVariable(
       // Una ruta que no resuelve deja la variable a null, no la omite: omitirla haría que
       // `{{vars.saldo}}` saliera literal en vez de vacío, que es el aviso equivocado (ver la
       // distinción vacía/inalcanzable del contrato 42).
-      fuera = conVariable(fuera, par.nombre, valorDe(fuera, par.ruta) ?? null);
+      fuera = conVariable(fuera, par.nombre, valorDelCampo(fuera, par.ruta) ?? null);
     }
   }
   return fuera;

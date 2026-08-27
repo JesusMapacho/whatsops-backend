@@ -1,6 +1,6 @@
 // Check del catálogo de nodos (v3 feature 17). Correr: npx ts-node src/automations/catalog.check.ts
 import * as assert from 'node:assert';
-import { GUARDAR_COMO, NODE_TYPES, catalogoPublico, interpolarConfig, modoRutas, nodeType, schemaDe, validarConfig, validarTrigger } from './catalog';
+import { GUARDAR_COMO, NODE_TYPES, argumentosDe, catalogoPublico, interpolarConfig, modoRutas, nodeType, schemaDe, validarConfig, validarTrigger } from './catalog';
 import { TRIGGERS } from './triggers';
 
 // --- forma del catálogo ---
@@ -156,6 +156,26 @@ for (const t of NODE_TYPES) {
       `${t.key}.${clave}: un campo \`campos\` tiene que declarar \`fuente\``,
     );
   }
+}
+
+// --- `argumentos` resuelve la misma tubería que `campos` (§16) -----------------------------
+// Es el MISMO `tipo: 'campos'` del catálogo, y el editor autocompleta funciones por tipo. Con
+// `valorDe` pelado, un `| cuenta` en «Datos que recibe» llegaba al hijo como `null` y en
+// silencio — el mismo fallo que el `campos` de la 47, en el nodo de al lado.
+{
+  const ctx = { vars: { pedidos: [{ id: 1 }, { id: 2 }] } };
+  const args = argumentosDe(
+    {
+      argumentos: [
+        { nombre: 'cuantos', ruta: 'vars.pedidos | cuenta' },
+        { nombre: 'ids', ruta: 'vars.pedidos | campo:"id" | unir:"-"' },
+        { nombre: 'pelada', ruta: 'vars.pedidos.0.id' },
+        { nombre: 'nada', ruta: 'vars.no.existe' },
+      ],
+    },
+    ctx,
+  );
+  assert.deepStrictEqual(args, { cuantos: 2, ids: '1-2', pelada: 1, nada: null });
 }
 
 // --- el flag `espera` no se puede olvidar (43) --------------------------------------------

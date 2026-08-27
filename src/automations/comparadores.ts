@@ -4,8 +4,7 @@
 // Seis operadores y ni uno más: son los que la spec pide y los que un operador entiende
 // sin manual. Un motor de expresiones aquí sería un lenguaje que nadie puede depurar
 // cuando la automatización le mande el mensaje equivocado a un cliente.
-import { Contexto, valorDe } from './contexto';
-import { aplicar, parseExpresion } from './expresiones';
+import { Contexto, valorDelCampo } from './contexto';
 
 export const OPERADORES = ['eq', 'neq', 'contains', 'gt', 'lt', 'matches'] as const;
 export type Operador = (typeof OPERADORES)[number];
@@ -64,18 +63,10 @@ export function comparar(op: Operador, izq: unknown, der: unknown): boolean {
   }
 }
 
-/**
- * El «Campo» de un nodo de lógica es una ruta CRUDA (sin llaves), pero admite la misma
- * tubería de funciones que `{{...}}`: `vars.lista | cuenta` comparado contra 3 es «si la
- * lista tiene más de tres». Sin esto, contar elementos obliga a pagar un `code.run` —un
- * proceso hijo— para algo que es una función de una línea.
- *
- * Si no parsea, se resuelve como ruta pelada: es lo que hacía antes y no rompe nada guardado.
- */
-function valorDelCampo(ctx: Contexto, campo: string): unknown {
-  const e = parseExpresion(campo);
-  return e ? aplicar(valorDe(ctx, e.ruta), e.funciones) : valorDe(ctx, campo);
-}
+// El «Campo» de un nodo de lógica es una ruta CRUDA (sin llaves) que admite la misma tubería
+// que `{{...}}`: `vars.lista | cuenta` comparado contra 3 es «si la lista tiene más de tres».
+// `valorDelCampo` se mudó a `contexto.ts` cuando el `campos` de la 47 y el `argumentos` de
+// `flow.call` pasaron a necesitar la misma resolución: ver allí por qué no son tres copias.
 
 /** `logic.condition`: devuelve la rama `'true'` o `'false'` que el motor busca en las aristas. */
 export function ramaDeCondicion(

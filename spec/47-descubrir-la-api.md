@@ -56,6 +56,8 @@ Y por eso el sondeo **habla el vocabulario de `aplanar`**, no uno propio. Las do
 - **Los arrays no se expanden por índice.** Va con `deLista: true` y punto. Si el sondeo
   ofreciera `data.0.saldo` y el último run ofreciera `data`, el mismo campo tendría **dos
   vocabularios distintos** según de dónde salieron las rutas.
+  *(Enmendado el 27 ago 2026: los dos abren **un** elemento, `data.0.saldo`, y los dos paran
+  ahí. La regla de un solo vocabulario no cambia — cambian los dos a la vez. Ver abajo.)*
 - **Las claves que la gramática no acepta** (`account-balance`, `Content-Type`) no se ofrecen,
   porque `{{vars.account-balance}}` no resuelve nunca y ofrecerla es ofrecer una mentira. Pero
   aquí tampoco se **descartan**: viajan con `alcanzable: false`, porque el operador ve ese campo
@@ -98,6 +100,44 @@ razón de elegirlo:
 3. Sirve para **cualquier** nodo que devuelva algo, no solo el de la API. No se ofrece en la
    pantalla para los demás todavía, pero el mecanismo no distingue — y no distinguir es
    menos código que distinguir.
+
+## Abrir las listas, y que `campos` resuelva la tubería (enmienda, 27 ago 2026)
+
+Dos cosas que se enmiendan juntas porque separadas dejan medio camino, que es el que confunde.
+El contrato las lleva en el §3 reescrito y el §16 nuevo.
+
+**1. El sondeo baja UN elemento dentro de cada lista** (`sondeo.ts`, la rama de hoja de
+`aplanarRespuesta`): la hoja de la lista se sigue emitiendo igual —es sobre ella donde se aplican
+`| cuenta` y `| unir`— y además se recorre `v[0]` con la ruta `.0`, si es un objeto. Tres
+decisiones que el sitio no dice solo:
+
+- **Uno, no todos.** Cien elementos por diez claves son mil rutas. El argumento del scroll
+  infinito de `aplanar` sigue en pie; lo que se retira es la conclusión de que para bajar hacía
+  falta `code.run`.
+- **El índice NO gasta profundidad.** Un índice no es un nivel del modelo de datos del operador,
+  es un artefacto. Y la cuenta lo confirma: `MAX_PROFUNDIDAD` son tres tramos, así que
+  contándolo `results.0.name` se los gastaría los tres.
+- **Solo si el elemento es un objeto.** `topics: ["fire","water"]` no tiene claves que enseñar.
+
+**2. Un campo `campos` resuelve expresiones** (`contexto.ts`, y `catalog.ts` en `argumentosDe`).
+`valorDelCampo` **ya existía** en `comparadores.ts` y hacía exactamente esto; se **mueve** a
+`contexto.ts` y los tres sitios la comparten, en vez de tener tres copias de la regla de
+resolución que se separan al primer retoque. La dirección de dependencias ya era esa.
+
+> **Esto era un fallo silencioso en producción, no una mejora.** El editor autocompleta funciones
+> en las filas de un campo `campos` **por tipo de campo**, no por nodo, así que ya ofrecía
+> `| cuenta` ahí. El servidor resolvía con `valorDe` pelado: la ruta con tubería no casa ninguna
+> clave, sale `undefined`, y el `?? null` la dejaba en `null` **sin que nada lo dijera**. El
+> editor sugería algo que el motor tiraba.
+>
+> Y estaba en **dos** sitios, no en uno: `flow.call.argumentos` es el mismo `tipo: 'campos'` y
+> también resolvía pelado. El frontend reportó el primero; el segundo salió de buscar quién más
+> comparte el tipo, y se arregla en la misma pasada porque es la misma línea.
+
+**Lo que no cambia:** `ok` y la clasificación del §11; el `?? null` de `campos`, que deja la
+variable en `null` en vez de omitirla; el bloqueo de `constructor`, porque `valorDelCampo` sigue
+recorriendo con `valorDe`; y la rama de clave inalcanzable de `aplanarRespuesta`, donde **no** se
+baja a propósito —un tramo intermedio inválido hace que nada de lo de dentro resuelva—.
 
 ## `variables` en la respuesta del sondeo (enmienda, 26 ago 2026)
 
@@ -155,10 +195,12 @@ que va con enmienda.
 ## Lo que NO se construye
 
 - **Un catálogo de APIs conocidas**, ni plantillas por proveedor. Es un catálogo que envejece.
-- **`map` sobre listas.** El sondeo marca la lista con `deLista` y ahí se para; recorrer los N
-  elementos es otra feature, y hoy se hace con `code.run`. Es la misma frontera que la de no
-  expandir por índice — *ponytail: techo conocido, camino = una función `mapear` en
-  `expresiones.ts`*.
+- **`map` sobre listas.** Recorrer los **N** elementos es otra feature, y hoy se hace con
+  `code.run` — *ponytail: techo conocido, camino = una función `mapear` en `expresiones.ts`*.
+  *(Enmendado el 27 ago 2026: lo que sí se hace es abrir el primero. La frase original decía que
+  el sondeo «marca la lista con `deLista` y ahí se para», y de ahí se leía que para sacar un
+  campo de un elemento hacía falta `code.run`. Eso era falso: `valorDe` indexa arrays desde
+  siempre.)*
 - **Guardar el resultado del sondeo.** Es de usar y tirar: se llama, se eligen campos, se
   guarda el nodo. Nada que persistir, nada que invalidar.
 - **Autenticación de la API** (cabeceras, tokens). Es una feature con su propio problema —dónde
@@ -234,6 +276,12 @@ que va con enmienda.
    Las dos filas del medio son **la** prueba de que el caso 3 no se colapsa con el 401: las dos
    traen `rutas: []` y solo `ok` las distingue. Es el desglose que este contrato peleó.
 
+   > **Las dos últimas filas quedaron desactualizadas el 27 ago 2026**, con el arreglo del
+   > punto 8: el 401 de `api.github.com/user` trae ahora `rutas` con `message` y
+   > `documentation_url` dentro (contrato §15). El caso 3 sigue siendo el único con `rutas: []`,
+   > así que el desglose no se pierde — al revés, las dos pantallas ya ni se parecen, y `ok`
+   > sigue siendo lo único que clasifica.
+
 6. Y lo que ya estaba, revisado otra vez con la base arriba:
    - Sin `guardarComo` → 400 «Ponle nombre al resultado antes de sondear».
    - La URL se interpola **antes** de validar: con `{{contacto.waId}}` vacío, el error nombra el
@@ -251,7 +299,74 @@ que va con enmienda.
    encontré un endpoint público estable que lo dé, así que la afirmación va partida en dos
    —`api.github.com/user` pone el 401 con `cuerpo`, `httpbin.org/html` pone el recorte de HTML— y
    las dos mitades están firmadas. Lo que falta es verlas juntas, que es un caso de forma, no de
-   código: `cuerpo` sale del mismo `crudo.slice(0, 2000)` en los dos.
+   código: `cuerpo` sale del mismo recorte a 2000 en los dos.
+
+8. **El `slice` de 64 KB iba antes del `JSON.parse`. Arreglado y firmado el 27 ago 2026.** Lo
+   encontró la sesión del frontend: el panel decía «tu API contestó 200» pintado como error. El
+   servicio recortaba el cuerpo a 64 KB **antes** de parsearlo, así que toda respuesta JSON
+   válida más grande se partía a media cadena, `JSON.parse` reventaba y salía
+   `estado: 200, ok: false`. Y el recorte no protegía nada: `res.text()` ya había materializado
+   el cuerpo entero.
+
+   De paso, el `if (!ok)` devolvía `rutas: []` aunque el cuerpo del error fuera JSON — la
+   enmienda §15 del contrato. Ahora se aplana igual, y `ok` sigue siendo lo único que clasifica.
+
+   Las siete llamadas, contra `POST /automations/seed47-auto/sondear` con sesión y CSRF de
+   verdad, no contra la función suelta:
+
+   | URL | Antes | Salió |
+   |---|---|---|
+   | `pokeapi.co/api/v2/pokemon?limit=2000` (93 KB) | `estado: 200`, **`ok: false`**, `rutas: []` | **`ok: true`**, `count`/`next`/`previous`/`results`, `results` con `deLista: true` y ejemplo «1351 elementos» — **no** 1351 filas |
+   | `api.github.com/repos/nope/nope-no-existe-xyz` | `404`, `rutas: []` | `404`, `ok: false`, **tres rutas** (`message`, `documentation_url`, `status`), más `cuerpo` y `respuesta` |
+   | `api.github.com/user` | `401`, `rutas: []` | `401`, `ok: false`, las mismas tres rutas — la fila del punto 5 que esto desactualizó |
+   | `httpbin.org/html` | `200`, `ok: false`, `cuerpo` | **igual**: el HTML no parsea y el arreglo no lo convierte en un falso «bien» |
+   | `httpbin.org/json` | `ok: true`, cuatro rutas | igual, sin cambio |
+   | `api.github.com/users/octocat/orgs` (`[]`) | `200`, `ok: true`, `rutas: []` | igual — sigue siendo el **único** caso con `rutas: []` y `ok: true` |
+   | `httpbin.org/status/302` | `302`, `error` puesto | igual: el bloque de 3xx no se tocó, ahí no hay cuerpo que aplanar |
+
+   La regresión que importa es la primera fila; las tres últimas están para afirmar lo que **no**
+   cambió. `AutomationRun` y `AutomationRunStep` siguieron en `7 | 19` antes y después: el sondeo
+   sigue sin crear ninguna fila.
+
+   `sondeo.check.ts` no gana ningún assert, y es a propósito: el bug vivía en el orden de dos
+   líneas del servicio, no en `aplanarRespuesta`, y un check que no toca red no puede verlo. Lo
+   que sí queda es el `ponytail:` de `automations.service.ts`, que nombra por qué el recorte no
+   puede volver a subir por encima del parseo.
+
+   > **Y esto tapaba una verificación entera, no solo una respuesta.** El árbol de la app —el §13
+   > del contrato— llevaba desde el 26 ago marcado «escrito, sin ver en pantalla», con «la API
+   > estaba caída» como motivo. Era falso: **toda** respuesta de más de 64 KB salía clasificada
+   > como fallo, así que la pantalla del árbol no se pintaba nunca con una API de verdad, y quien
+   > lo intentara a mano con una API grande veía la pantalla de error sin saber por qué. Se vio
+   > por primera vez el 27 ago, con este arreglo dentro. El aviso que deja: un bug de
+   > clasificación no cuesta una respuesta, cuesta la pantalla que cuelga de ella — y el motivo
+   > que se apunta al aparcar una verificación puede ser el síntoma de otra cosa.
+
+9. **Abrir las listas y la tubería en `campos`. Firmado el 27 ago 2026.** Contra
+   `POST /automations/seed47-auto/sondear` con sesión y CSRF de verdad:
+
+   | URL | Salió |
+   |---|---|
+   | `pokeapi.co/api/v2/pokemon?limit=2000` | seis rutas: las cuatro de antes **más** `results.0.name` y `results.0.url`. Una vez, no 1351. `results` sigue con `deLista` y ejemplo «1351 elementos» |
+   | `api.github.com/repos/nestjs/nest` | 126 rutas. **`topics` sale como hoja `lista` y NO se abre** —es lista de escalares—, mientras `owner`, `license` y `organization` sí bajan como objetos |
+   | `httpbin.org/json` | `slideshow.slides` abre `slides.0.title` y `slides.0.type` |
+
+   Y la prueba de que la ruta que se ofrece **no es una ruta muerta**: simular en seco
+   `seed47-auto` con `httpRespuestas: { 'seed47-n1': { data: [{ saldo: 1234 }], cliente: {…} } }`
+   dejó el último paso en `Tu saldo es 1234, Leticia.`. O sea que `vars.api.json.data.0.saldo`
+   —con índice— resuelve por el camino real de `campos`, que es justo lo que la pantalla decía
+   que no se podía.
+
+   La tubería en `campos` **no** está firmada contra la API porque cambiarla exige reescribir la
+   config del nodo en base, y no hacía falta: `contexto.check.ts` y `catalog.check.ts` la afirman
+   sobre los dos sitios, y **los rompí a propósito** volviendo a `valorDe` para ver el fallo con
+   sus palabras — `actual: null, expected: 1`. Un check que no se ha visto fallar no prueba nada.
+
+   Un aviso que salió de escribir el check: la primera versión afirmaba `a.b.c.0.d` y **falló**.
+   No era el código: `a.b.c` ya se gasta los tres tramos de `MAX_PROFUNDIDAD`, así que ese caso
+   topa por profundidad tanto si el índice cuenta como si no. El caso que de verdad distingue es
+   `a.b` + lista, y está escrito así. Abrir listas no salta el tope: `a.b.c.0` sale cortado y con
+   `truncado: 'profundidad'`, y eso también se afirma.
 
 ## El orden de despliegue, que no es el habitual
 

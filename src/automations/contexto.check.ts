@@ -163,6 +163,27 @@ for (const malo of ['constructor', '__proto__', 'prototype']) {
   );
   assert.strictEqual(valorDe(conCampos, 'vars.saldo'), 10, 'el índice de una lista se resuelve');
   assert.strictEqual(valorDe(conCampos, 'vars.quien'), 'Ana');
+
+  // Y una fila de `campos` admite la TUBERÍA, no solo una ruta pelada (§16). No es un lujo: el
+  // editor autocompleta funciones en estas filas —lo hace por tipo de campo, no por nodo— así
+  // que sin esto sugería algo que el motor tiraba, y la variable salía `null` sin que nada lo
+  // dijera. Es el fallo silencioso que el §16 cierra.
+  const conTuberia = conSalidaYVariable(
+    base,
+    {
+      id: 'n1',
+      config: {
+        guardarComo: 'api',
+        campos: [
+          { nombre: 'cuantos', ruta: 'vars.api.json.data | cuenta' },
+          { nombre: 'saldos', ruta: 'vars.api.json.data | campo:"saldo" | unir:", "' },
+        ],
+      },
+    },
+    salida,
+  );
+  assert.strictEqual(valorDe(conTuberia, 'vars.cuantos'), 1);
+  assert.strictEqual(valorDe(conTuberia, 'vars.saldos'), '10');
   // Y el JSON entero sigue donde estaba: `campos` AÑADE nombres, no los sustituye.
   assert.strictEqual(valorDe(conCampos, 'vars.api.status'), 200);
 

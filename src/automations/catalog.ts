@@ -9,7 +9,7 @@
 // que la ventana de 24 h, los topes anti-baneo, el alcance por rol y las reglas del CRM
 // valgan igual desde una automatización que desde la pantalla.
 import { BadRequestException } from '@nestjs/common';
-import { Contexto, NOMBRE_VAR, VariableVista, interpolar, valorDe } from './contexto';
+import { Contexto, NOMBRE_VAR, VariableVista, interpolar, valorDe, valorDelCampo } from './contexto';
 import { TOPE_MS, ejecutarCodigo } from './codigo';
 import { ramaDeCondicion, ramaDeSwitch } from './comparadores';
 import { TRIGGERS } from './triggers';
@@ -243,8 +243,13 @@ function actor(ej: Ejecucion): string {
 /**
  * Los `argumentos` de una llamada, resueltos contra el contexto del PADRE.
  *
- * Misma forma que el `campos` de la 47 —pares nombre → ruta— y misma lectura con `valorDe`, que
- * es lo que bloquea `constructor` y la cadena de prototipos: aquí la ruta la escribe el operador.
+ * Misma forma que el `campos` de la 47 —pares nombre → ruta— y misma lectura con
+ * `valorDelCampo`, que por dentro es `valorDe` y por eso sigue bloqueando `constructor` y la
+ * cadena de prototipos: aquí la ruta la escribe el operador.
+ *
+ * `valorDelCampo` y no `valorDe` pelado por lo mismo que el `campos` de la 47 (§16): esto es el
+ * MISMO `tipo: 'campos'` del catálogo, y el editor autocompleta tuberías por tipo. Un
+ * `vars.pedidos | cuenta` en «Datos que recibe» llegaba al hijo como `null`, en silencio.
  *
  * Una ruta que no resuelve entra como `null` y no se omite: omitirla haría que `{{vars.x}}` del
  * hijo saliera LITERAL en vez de vacío, que es el aviso equivocado.
@@ -256,7 +261,7 @@ export function argumentosDe(config: unknown, ctx: Contexto): Record<string, unk
   for (const raw of lista) {
     const par = (raw ?? {}) as { nombre?: unknown; ruta?: unknown };
     if (typeof par.nombre !== 'string' || !par.nombre || typeof par.ruta !== 'string') continue;
-    out[par.nombre] = valorDe(ctx, par.ruta) ?? null;
+    out[par.nombre] = valorDelCampo(ctx, par.ruta) ?? null;
   }
   return out;
 }

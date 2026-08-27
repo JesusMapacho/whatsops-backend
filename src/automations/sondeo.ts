@@ -4,10 +4,10 @@
 // lo que contestó en la lista que alimenta el autocompletado del editor.
 //
 // **Habla el vocabulario de `aplanar` del frontend (`rutas.ts:238-247`), no uno propio.** Las
-// dos reglas de allí se repiten aquí porque son las mismas rutas: si el sondeo ofreciera
-// `data.0.saldo` y el último run ofreciera `data`, el mismo campo tendría dos vocabularios
-// según de dónde salieron, y nadie va a entender por qué. El argumento entero, en
-// `contrato/47 §3`.
+// reglas de allí se repiten aquí porque son las mismas rutas: si uno de los dos ofreciera
+// `data.0.saldo` y el otro parara en `data`, el mismo campo tendría dos vocabularios según de
+// dónde salieron, y nadie va a entender por qué. Los dos abren un elemento, y los dos paran ahí.
+// El argumento entero, en `contrato/47 §3`.
 import { claveSegura } from './expresiones';
 
 /**
@@ -29,8 +29,10 @@ export interface RutaSondeada {
   ruta: string;
   tipo: 'texto' | 'numero' | 'booleano' | 'lista' | 'objeto' | 'nulo';
   ejemplo: unknown;
-  /** Esta hoja es un array. NO se expande por índice: para sacar un elemento hace falta
-   *  `code.run`, que es la misma frontera que dejó el `map` fuera de esta feature. */
+  /** Esta hoja es un array. La lista viaja como hoja —es sobre ella donde se aplican
+   *  `| cuenta` y `| unir`— y **además** se abre su PRIMER elemento si es un objeto, con la
+   *  ruta `.0` (§16). Lo que sigue sin haber es expansión de los N elementos: para recorrerlos
+   *  hace falta `code.run`, que es la frontera que dejó el `map` fuera de esta feature. */
   deLista?: true;
   /** La gramática de `VAR` no acepta esta clave (`account-balance`, `Content-Type`). Viaja
    *  marcada en vez de descartarse: el operador ve ese campo en la respuesta de su API, y si no
@@ -108,6 +110,27 @@ export function aplanarRespuesta(valor: unknown, prefijo: string): Aplanado {
           ...(tramoAlcanzable(clave) ? {} : { alcanzable: false as const }),
         });
       }
+      // ponytail: se abre UN elemento, el primero, y solo si es un objeto. Cien elementos por
+      // diez claves son mil rutas, y el argumento del scroll de `aplanar` sigue en pie — lo que
+      // se retira no es ese, es la conclusión de que para bajar hacía falta `code.run`, que era
+      // falsa desde el principio: `valorDe` indexa arrays sin caso especial (`claveSegura('0')`
+      // es true) y la propia semilla de esta feature guarda `vars.api.json.data.0.saldo`.
+      //
+      // Techo: la forma es la del PRIMER elemento; con una lista de elementos heterogéneos esto
+      // miente, y por eso la pantalla lo dice. Camino: unir las claves de los N primeros, el día
+      // que alguien traiga una API que lo necesite.
+      //
+      // `prof` NO sube al bajar por el `0`: un índice no es un nivel del modelo de datos del
+      // operador, es un artefacto. Y la cuenta lo confirma — `MAX_PROFUNDIDAD` son tres tramos
+      // tras el prefijo, así que contándolo `results.0.name` se los gastaría los tres y
+      // `results.0.direccion.ciudad` ya no cabría.
+      //
+      // Una lista de escalares (`topics: ["fire"]`) no se abre: no tiene claves que enseñar, y
+      // para eso están `| primero` y `| unir` sobre la hoja. Y no hace falta guardia de tope:
+      // `rec` comprueba `MAX_RUTAS` al entrar, y un array a profundidad tope cae por
+      // `cortadoPorHondo`.
+      const primero = Array.isArray(v) ? v[0] : undefined;
+      if (primero !== null && typeof primero === 'object') rec(primero, `${ruta}.0`, prof);
       return;
     }
     vistos.add(v as object);

@@ -30,17 +30,73 @@ const una = (v: unknown, ruta: string) => aplanarRespuesta(v, P).rutas.find((r) 
   assert.strictEqual(a.truncado, undefined, 'ausente, NO false: un campo presente dice algo');
 }
 
-// --- Los arrays NO se expanden por índice --------------------------------------------------
-// Es la regla de `aplanar`, y el motivo no es el scroll: si aquí saliera `data.0.saldo` y del
-// último run saliera `data`, el mismo campo tendría dos vocabularios.
+// --- Una lista se abre UN elemento, no cien (§16) -------------------------------------------
+// La regla sigue siendo «no cien» — el scroll infinito es el argumento y no se ha ido—, pero
+// ahora son DOS: la hoja de la lista y las claves de su primer elemento. Lo que se retiró es la
+// conclusión de que para bajar hacía falta `code.run`, que era falsa: `valorDe` indexa arrays.
+// Y sigue siendo el vocabulario de `aplanar`: los dos abren uno y los dos paran ahí.
 {
   const cien = Array.from({ length: 100 }, (_, i) => ({ saldo: i }));
   const a = aplanarRespuesta({ data: cien }, P);
-  assert.deepStrictEqual(a.rutas.map((r) => r.ruta), ['vars.api.json.data'], 'una ruta, no cien');
+  assert.deepStrictEqual(
+    a.rutas.map((r) => r.ruta),
+    ['vars.api.json.data', 'vars.api.json.data.0.saldo'],
+    'dos rutas, no cien ni una',
+  );
+  // La hoja de la lista se sigue emitiendo igual: es sobre ella donde se aplican `| cuenta` y
+  // `| unir`, así que abrir el elemento no puede costar la lista.
   assert.strictEqual(a.rutas[0].tipo, 'lista');
   assert.strictEqual(a.rutas[0].deLista, true);
   assert.strictEqual(a.rutas[0].ejemplo, '100 elementos');
+  assert.strictEqual(a.rutas[1].tipo, 'numero');
+  assert.strictEqual(a.rutas[1].deLista, undefined, 'el elemento abierto NO es una lista');
   assert.strictEqual(aplanarRespuesta({ d: [1] }, P).rutas[0].ejemplo, '1 elemento', 'singular');
+}
+
+// --- Qué NO se abre -------------------------------------------------------------------------
+{
+  // Una lista de escalares no tiene claves que enseñar; para eso están `| primero` y `| unir`.
+  assert.deepStrictEqual(rutas({ topics: ['fire', 'water'] }), ['vars.api.json.topics']);
+  assert.deepStrictEqual(rutas({ d: [] }), ['vars.api.json.d'], 'una lista vacía tampoco');
+  assert.deepStrictEqual(rutas({ d: [null] }), ['vars.api.json.d'], 'ni un null de primero');
+  // Bajo una clave inalcanzable NO se baja, y eso no cambia: `{{vars.a-b.0.x}}` no resuelve por
+  // el tramo de en medio, así que ofrecer lo de dentro sería ofrecer varias mentiras.
+  assert.deepStrictEqual(rutas({ 'a-b': [{ x: 1 }] }), ['vars.api.json.a-b']);
+}
+
+// --- El índice NO gasta profundidad ---------------------------------------------------------
+// Un índice no es un nivel del modelo de datos del operador, es un artefacto. Si contara, con
+// `MAX_PROFUNDIDAD = 3` la ruta `a.b.c.0.d` no cabría — y es de las más comunes que hay.
+{
+  // `a.b` gasta dos, y quedaría uno. Si el `0` contara, el elemento caería en el tope y saldría
+  // `a.b.0` a secas; como no cuenta, se llega a la clave de dentro.
+  const a = aplanarRespuesta({ a: { b: [{ c: 1 }] } }, P);
+  assert.deepStrictEqual(a.rutas.map((r) => r.ruta), [
+    'vars.api.json.a.b',
+    'vars.api.json.a.b.0.c',
+  ]);
+  assert.strictEqual(a.truncado, undefined, 'y no cuenta como topar la profundidad');
+
+  // Lo que sí topa es la profundidad de verdad: `a.b.c` ya se gasta los tres tramos, así que el
+  // elemento de esa lista se corta como objeto y lo DICE. Abrir listas no salta el tope.
+  const t = aplanarRespuesta({ a: { b: { c: [{ d: 1 }] } } }, P);
+  assert.deepStrictEqual(t.rutas.map((r) => r.ruta), [
+    'vars.api.json.a.b.c',
+    'vars.api.json.a.b.c.0',
+  ]);
+  assert.strictEqual(t.truncado, 'profundidad');
+}
+
+// --- Una lista en la RAÍZ también se abre ---------------------------------------------------
+// Muchas APIs devuelven el array pelado. La hoja no sale (la raíz nunca se emite), pero las
+// claves del primer elemento sí, que es lo único que había que ofrecer.
+{
+  assert.deepStrictEqual(rutas([{ id: 1, nombre: 'Ana' }]), [
+    'vars.api.json.0.id',
+    'vars.api.json.0.nombre',
+  ]);
+  // Y el caso 3 del contrato no se mueve: `[]` sigue sin tener nada que nombrar.
+  assert.deepStrictEqual(rutas([]), []);
 }
 
 // --- Alcanzable: la regla es la de los TRAMOS, no la de los NOMBRES ------------------------
