@@ -357,10 +357,24 @@ que va con enmienda.
    —con índice— resuelve por el camino real de `campos`, que es justo lo que la pantalla decía
    que no se podía.
 
-   La tubería en `campos` **no** está firmada contra la API porque cambiarla exige reescribir la
-   config del nodo en base, y no hacía falta: `contexto.check.ts` y `catalog.check.ts` la afirman
-   sobre los dos sitios, y **los rompí a propósito** volviendo a `valorDe` para ver el fallo con
-   sus palabras — `actual: null, expected: 1`. Un check que no se ha visto fallar no prueba nada.
+   La tubería en `campos` la afirman `contexto.check.ts` y `catalog.check.ts` sobre los dos
+   sitios, y **los rompí a propósito** volviendo a `valorDe` para ver el fallo con sus palabras —
+   `actual: null, expected: 1`. Un check que no se ha visto fallar no prueba nada.
+
+   **Y firmada también por el camino real**, que es lo que aquí no se podía hacer sin reescribir
+   la config del nodo en base: la sesión del frontend guardó tres filas de `campos` contra la API
+   —`name` → `results.0.name`, `results_name` → `results | campo:"name" | unir:", "`, `cuantos` →
+   `results | cuenta`— y simuló en seco con tres elementos. El contexto final trajo
+   `{"cuantos": 3, "name": "bulbasaur", "results_name": "bulbasaur, ivysaur, venusaur"}`. Guardar
+   no dio 400: `validarConfig` comprueba `NOMBRE_VAR` sobre el **nombre** y no la forma de la
+   `ruta`, así que una con comillas y espacios pasa — que es justo lo que hacía falta aquí, y
+   está dicho para que nadie lo cierre por parecer un descuido.
+
+   > **Un techo que esta enmienda acerca, dicho y no tocado.** `MAX_RUTAS` son 200, y abrir las
+   > listas añade filas: un `repos/nestjs/nest` normal ya se planta en 126. `truncado: 'rutas'`
+   > sigue avisando cuando se topa, así que no hay nada silencioso; lo que cambia es que ahora se
+   > topa antes. No se sube porque no hay ninguna respuesta real que lo pida — *ponytail: si
+   > alguien trae una que se corte de verdad, el número está en `sondeo.ts` y es una línea*.
 
    Un aviso que salió de escribir el check: la primera versión afirmaba `a.b.c.0.d` y **falló**.
    No era el código: `a.b.c` ya se gasta los tres tramos de `MAX_PROFUNDIDAD`, así que ese caso
