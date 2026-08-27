@@ -694,8 +694,6 @@ export class AutomationsService {
 
   // --- sondeo de APIs (feature 47) --------------------------------------------------------
 
-  /** Lo que se lee del cuerpo. Un sondeo es para reconocer la forma, no para traerse el dato. */
-  private static readonly TOPE_CUERPO = 64 * 1024;
   private static readonly TIMEOUT_SONDEO_MS = 10_000;
 
   /**
@@ -784,13 +782,17 @@ export class AutomationsService {
         };
       }
 
-      // ponytail: se lee el cuerpo entero y se recorta despues. Techo: una respuesta enorme pasa
-      // por memoria una vez. Camino: leer el stream por trozos y cortar, cuando alguien lo note.
-      const crudo = (await res.text()).slice(0, AutomationsService.TOPE_CUERPO);
+      // ponytail: se lee el cuerpo entero y se recorta DESPUES, solo para ensenarlo. El recorte
+      // NO puede ir antes del parseo: `res.text()` ya materializo la respuesta completa, asi que
+      // el slice no ahorraba memoria y en cambio partia todo JSON de mas de 64 KB por la mitad —
+      // un 200 valido salia como `ok: false`, y el sintoma («tu API contesto 200» pintado como
+      // error) no lleva a su causa. Techo: una respuesta enorme pasa por memoria una vez. Camino:
+      // leer el stream por trozos y cortar en la primera llave que cierre, cuando alguien lo note.
+      const texto = await res.text();
       let json: unknown;
       let hayJson = false;
       try {
-        json = JSON.parse(crudo);
+        json = JSON.parse(texto);
         hayJson = true;
       } catch {
         hayJson = false;
@@ -801,12 +803,19 @@ export class AutomationsService {
         // `cuerpo` y no solo `rutas: []`: un sondeo acaba en 401 mucho mas a menudo que en un
         // JSON limpio, y con la lista vacia a secas la pantalla solo puede decir «no
         // encontramos nada», que es mentira cuando la verdad es «tu API contesto 401».
+        //
+        // Y `rutas` tambien aqui (contrato §15): un error con JSON dentro trae campos que se
+        // pueden nombrar. Lo que NO cambia es `ok`: sigue siendo un fallo, y el §11 sigue
+        // mandando sobre la clasificacion. Que esas rutas no se ofrezcan solas en el
+        // autocompletado es guarda del cliente, y esta escrita en el §15.
+        const { rutas, truncado } = hayJson ? aplanarRespuesta(json, prefijo) : { rutas: [], truncado: undefined };
         return {
           estado: res.status,
           ok: false,
-          rutas: [],
+          rutas,
           variables: avisos,
-          cuerpo: crudo.slice(0, 2000),
+          cuerpo: texto.slice(0, 2000),
+          ...(truncado ? { truncado } : {}),
           ...(hayJson ? { respuesta: json } : {}),
         };
       }
