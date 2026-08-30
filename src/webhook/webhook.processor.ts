@@ -1,12 +1,13 @@
-import { Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Job, Queue } from 'bullmq';
+import type { Job } from 'pg-boss';
 import type { WabaConnection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { CryptoService } from '../crypto/crypto.service';
 import { StorageService } from '../storage/storage.service';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY } from '../queue/queue-options';
 import { downloadFromGraph, withMediaUrl, MediaKind } from '../messaging/media.util';
 import { decodeWebhook, InboundMessage, MessageMutation, StatusUpdate } from './decode';
 import { applyReaction } from './mutations';
@@ -31,9 +32,10 @@ const ALLOWED_STATUS = new Set<string>(['sent', 'delivered', 'read', 'failed']);
 const CLAIM_WINDOW_MS = 2 * 60 * 1000;
 const GRAPH_VERSION = 'v22.0';
 
-// Worker de la cola webhook-events. Reintentos/backoff los configura el módulo.
-@Processor(WEBHOOK_QUEUE)
-export class WebhookProcessor extends WorkerHost {
+// Worker de la cola webhook-events. Reintentos/backoff los configura el módulo (createQueue
+// en WebhookModule).
+@Injectable()
+export class WebhookProcessor implements OnModuleInit {
   private readonly logger = new Logger(WebhookProcessor.name);
   private readonly graphVersion: string;
   private readonly wahaUrl: string;
@@ -43,14 +45,21 @@ export class WebhookProcessor extends WorkerHost {
     private readonly events: EventsGateway,
     private readonly crypto: CryptoService,
     private readonly storage: StorageService,
-    // Solo la cola, no el módulo del orquestador: este worker ENCOLA y no ejecuta nada de
-    // una automatización (mismo motivo por el que `triggerOnInbound` es función libre).
-    @InjectQueue(AUTOMATION_QUEUE) private readonly automationQueue: Queue,
+    // Un solo cliente pg-boss para todo: registra el worker de esta cola Y encola en la del
+    // orquestador (mismo motivo por el que `triggerOnInbound` es función libre y no un
+    // provider — un import del módulo del orquestador aquí sería circular).
+    private readonly pgBoss: PgBossService,
     config: ConfigService,
   ) {
-    super();
     this.graphVersion = config.get<string>('GRAPH_API_VERSION') ?? GRAPH_VERSION;
     this.wahaUrl = (config.get<string>('WAHA_URL') ?? '').replace(/\/$/, '');
+  }
+
+  async onModuleInit() {
+    // Idempotente (ON CONFLICT DO NOTHING): a propósito no se confía en que el `createQueue`
+    // de WebhookModule ya haya corrido — Nest no garantiza ese orden entre providers.
+    await this.pgBoss.createQueue(WEBHOOK_QUEUE, STANDARD_RETRY);
+    await this.pgBoss.work<{ webhookEventId: string }>(WEBHOOK_QUEUE, (job) => this.process(job));
   }
 
   async process(job: Job<{ webhookEventId: string }>) {
@@ -101,7 +110,7 @@ export class WebhookProcessor extends WorkerHost {
         where: { id: event.id },
         data: { tenantId, processStatus: 'failed', processedAt: new Date(), error: message },
       });
-      throw err; // deja que BullMQ reintente con backoff
+      throw err; // deja que pg-boss reintente con backoff
     }
   }
 
@@ -207,7 +216,7 @@ export class WebhookProcessor extends WorkerHost {
     // —solo entrantes, mejor esfuerzo, nunca lanza— y el trabajo real se hace en la cola del
     // orquestador, no en este worker.
     if (direction === 'in') {
-      await triggerOnInbound(this.prisma, this.automationQueue, {
+      await triggerOnInbound(this.prisma, this.pgBoss, {
         tenantId,
         conversationId: conversation.id,
         contacto: { id: contact.id, name: contact.name, waId: contact.waId },
@@ -359,7 +368,7 @@ export class WebhookProcessor extends WorkerHost {
   // Reacción o borrado sobre un mensaje ya persistido.
   //
   // Si no tenemos el mensaje (previo al emparejamiento, filtrado por no ser 1-a-1,
-  // o de un historial no importado) es un NO-OP, nunca un error: si lanzara, BullMQ
+  // o de un historial no importado) es un NO-OP, nunca un error: si lanzara, pg-boss
   // reintentaría 3 veces y el evento quedaría `failed` para siempre ensuciando la
   // auditoría, por algo que no tiene arreglo.
   private async handleMutation(tenantId: string, mut: MessageMutation) {

@@ -1,8 +1,7 @@
-import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Queue } from 'bullmq';
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+import { PgBossService } from '../queue/pgboss.service';
 import { WEBHOOK_QUEUE } from '../webhook/webhook.service';
 import { BILLING_QUEUE } from '../billing/billing.service';
 import { WAHA_QUEUE } from '../waha/waha.service';
@@ -25,9 +24,7 @@ export class MetricsService {
   private readonly wahaKey: string;
 
   constructor(
-    @InjectQueue(WEBHOOK_QUEUE) private readonly webhookQueue: Queue,
-    @InjectQueue(BILLING_QUEUE) private readonly billingQueue: Queue,
-    @InjectQueue(WAHA_QUEUE) private readonly wahaQueue: Queue,
+    private readonly queue: PgBossService,
     private readonly prisma: PrismaService,
     config: ConfigService,
   ) {
@@ -57,8 +54,8 @@ export class MetricsService {
     });
 
     this.queueJobs = new Gauge({
-      name: 'bullmq_jobs',
-      help: 'Jobs de BullMQ por cola y estado',
+      name: 'pgboss_jobs',
+      help: 'Jobs de pg-boss por cola y estado',
       labelNames: ['queue', 'state'],
       registers: [this.registry],
     });
@@ -97,21 +94,22 @@ export class MetricsService {
     if (status >= 400) this.httpErrors.inc(labels);
   }
 
-  // Se muestrea al scrapear: conteos de jobs procesados/fallidos/en espera por cola.
-  // ponytail: latencia de proceso por job requeriría QueueEvents; se añade si se mide.
+  // Se muestrea al scrapear: conteos de jobs por cola y estado.
+  // ponytail: latencia de proceso por job requeriría trackear `completedOn - createdOn`
+  // job a job; se añade si se mide. pg-boss no expone un `completed` vivo: los completados
+  // se purgan por retención, así que ese estado no está en el gauge (antes tampoco decía
+  // nada útil salvo picos entre scrapes de 15 s).
   async scrape(): Promise<string> {
-    for (const [name, q] of [
-      [WEBHOOK_QUEUE, this.webhookQueue],
-      [BILLING_QUEUE, this.billingQueue],
-      [WAHA_QUEUE, this.wahaQueue],
-    ] as const) {
+    for (const name of [WEBHOOK_QUEUE, BILLING_QUEUE, WAHA_QUEUE]) {
       try {
-        const counts = await q.getJobCounts('completed', 'failed', 'active', 'waiting', 'delayed');
-        for (const [state, value] of Object.entries(counts)) {
-          this.queueJobs.set({ queue: name, state }, Number(value) || 0);
-        }
+        const q = await this.queue.getQueue(name);
+        if (!q) continue;
+        this.queueJobs.set({ queue: name, state: 'active' }, q.activeCount);
+        this.queueJobs.set({ queue: name, state: 'failed' }, q.failedCount);
+        this.queueJobs.set({ queue: name, state: 'waiting' }, q.readyCount);
+        this.queueJobs.set({ queue: name, state: 'delayed' }, q.deferredCount);
       } catch {
-        // si Redis no responde, no rompemos el scrape del resto de métricas
+        // si Postgres no responde, no rompemos el scrape del resto de métricas
       }
     }
 

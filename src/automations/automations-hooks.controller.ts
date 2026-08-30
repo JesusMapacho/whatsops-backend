@@ -6,7 +6,7 @@
 // **Lo que este archivo NO defiende, a propósito.** Un flood con tokens inválidos cuesta un
 // regex y, como mucho, un `findUnique` sobre un índice unique. Un limitador por IP aquí sería
 // teatro —`POST /auth/login` tampoco lo tiene— y quien pueda saturar esto puede saturar
-// `/webhook` igual. Eso vive en el borde (`limit_req` de nginx o Cloudflare sobre `/hooks/`).
+// `/webhook` igual. Eso vive en el borde (`limit_req` de nginx o Cloudflare sobre `/api/hooks/`).
 // Y la repetición: quien capture la petición la repite. Defenderlo pide firma HMAC, que es
 // justo lo que este diseño evita — la URL ES el secreto, ese es el producto. El día que haga
 // falta, es un campo en el `configSchema` del trigger y `webhook/signature.ts`, que ya existe.

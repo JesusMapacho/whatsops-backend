@@ -1,26 +1,22 @@
-import { BullModule } from '@nestjs/bullmq';
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CryptoModule } from '../crypto/crypto.module';
 import { EventsModule } from '../events/events.module';
-import { WahaService, WAHA_QUEUE } from './waha.service';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY } from '../queue/queue-options';
+import { WahaService, WAHA_QUEUE, WAHA_HISTORY_QUEUE } from './waha.service';
 import { WahaProcessor } from './waha.processor';
 
 @Module({
-  imports: [
-    PrismaModule,
-    CryptoModule,
-    EventsModule,
-    BullModule.registerQueue({
-      name: WAHA_QUEUE,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: 1000,
-      },
-    }),
-  ],
+  imports: [PrismaModule, CryptoModule, EventsModule],
   providers: [WahaService, WahaProcessor],
   exports: [WahaService],
 })
-export class WahaModule {}
+export class WahaModule implements OnModuleInit {
+  constructor(private readonly queue: PgBossService) {}
+
+  async onModuleInit() {
+    await this.queue.createQueue(WAHA_QUEUE, STANDARD_RETRY);
+    await this.queue.createQueue(WAHA_HISTORY_QUEUE, STANDARD_RETRY);
+  }
+}

@@ -1,8 +1,7 @@
-import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
 import { verifySignature } from './signature';
 import { webhookType } from './decode';
 import { verifyWahaSignature, wahaHmacKey } from './waha';
@@ -16,7 +15,7 @@ export class WebhookService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(WEBHOOK_QUEUE) private readonly queue: Queue,
+    private readonly queue: PgBossService,
     config: ConfigService,
   ) {
     this.appSecret = config.get<string>('META_APP_SECRET') ?? '';
@@ -60,7 +59,7 @@ export class WebhookService {
         processStatus: 'pending',
       },
     });
-    await this.queue.add('process', { webhookEventId: event.id });
+    await this.queue.send(WEBHOOK_QUEUE, { webhookEventId: event.id });
     return { received: true };
   }
 }

@@ -8,10 +8,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whatsops}
       POSTGRES_DB: ${POSTGRES_DB:-whatsops}
     ports:
-      # 127.0.0.1 y no 0.0.0.0, igual que WAHA (ver abajo el porqué). Lo mismo en redis,
+      # 127.0.0.1 y no 0.0.0.0, igual que WAHA (ver abajo el porqué). Lo mismo en
       # prometheus y grafana: son servicios de apoyo que solo consume el backend del host,
       # y publicarlos en todas las interfaces los deja alcanzables desde la red en cuanto
-      # este compose toque un servidor. Redis además no lleva contraseña.
+      # este compose toque un servidor.
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -21,18 +21,9 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+  # No hay servicio de Redis: las colas de trabajo (webhooks, automatizaciones, envíos
+  # masivos) las lleva pg-boss sobre esta misma base de Postgres (ver `src/queue/`), un
+  # backend menos que levantar tanto en local como en producción.
 
   waha:
     # WAHA = WhatsApp HTTP API NO oficial (automatiza WhatsApp Web). Transporte de
@@ -125,12 +116,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
 
 volumes:
   pgdata:
-  redisdata:
   grafanadata:
   wahasessions:
   storage:

@@ -5,7 +5,7 @@
 //
 // Toda la decisión —qué token vale, si esta automatización acepta hooks, si el cuerpo cabe,
 // qué estado devolver— está en `hooks.ts`, que es puro y está comprobado. Aquí solo queda la
-// plomería: buscar la fila, contar en Redis, crear el run y encolar.
+// plomería: buscar la fila, contar en Postgres, crear el run y encolar.
 import {
   ConflictException,
   Injectable,
@@ -14,10 +14,9 @@ import {
   PayloadTooLargeException,
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { HttpException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
 import { parsePhone } from '../messaging/contact-resolve';
 import { Contexto, interpolar } from './contexto';
 import { leerTrigger } from './triggers';
@@ -34,13 +33,19 @@ import {
   segundosRestantes,
 } from './hooks';
 
+// Ventanas viejas (minutos ya pasados) se purgan con baja probabilidad en cada llamada: no es
+// crítico para la corrección (la clave rota sola por minuto, así que una fila vieja
+// simplemente deja de incrementarse) y así se evita un cron dedicado para algo tan barato.
+const PURGA_PROBABILIDAD = 0.01;
+const PURGA_ANTIGUEDAD_MS = 5 * 60_000;
+
 @Injectable()
 export class AutomationsHooksService {
   private readonly logger = new Logger(AutomationsHooksService.name);
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(AUTOMATION_QUEUE) private readonly cola: Queue,
+    private readonly cola: PgBossService,
   ) {}
 
   /**
@@ -102,7 +107,7 @@ export class AutomationsHooksService {
     if (!run) throw new ConflictException('Ya hay una automatización esperando la respuesta de ese contacto.');
 
     try {
-      await this.cola.add('run', { runId: run.id });
+      await this.cola.send(AUTOMATION_QUEUE, { runId: run.id });
     } catch (e) {
       // Sin esto el run queda `running` sin job. Desde la feature 41 el barrido lo recogería,
       // pero aquí se cierra igual y en el acto: lo provoca un desconocido a voluntad llamando a
@@ -122,33 +127,38 @@ export class AutomationsHooksService {
    * tenants**, así que un tenant con veinte hooks metería 1200 jobs/min y dejaría a los demás
    * sin worker — aislar por `tenantId` en las queries no sirve si se agota el recurso común.
    *
-   * Se usa el cliente que BullMQ ya tiene abierto: ni un provider ni una conexión más.
-   * **Fail-open** si Redis no contesta: Redis caído significa BullMQ caído, así que el
-   * `cola.add` de después va a fallar igual; fingir una defensa aquí sería teatro.
+   * El incremento es un solo `INSERT ... ON CONFLICT DO UPDATE` atómico contra Postgres (la
+   * misma base que Neon, sin abrir una conexión aparte): dos peticiones concurrentes no pueden
+   * pisarse el conteo, la garantía que antes daba `INCR` de Redis.
+   * **Fail-open** si la base no contesta: si está caída, el `send` de después va a fallar
+   * igual; fingir una defensa aquí sería teatro.
    */
   private async dentroDelTope(automationId: string, tenantId: string, ahora: number): Promise<boolean> {
     try {
-      // La interfaz `IRedisClient` de BullMQ solo declara los comandos que BullMQ usa, y
-      // `incr`/`expire` no están; debajo es ioredis. Se pide justo lo que hace falta.
-      const redis = (await this.cola.client) as unknown as {
-        incr(k: string): Promise<number>;
-        expire(k: string, s: number): Promise<unknown>;
-      };
-      const cuenta = async (clave: string) => {
-        const n = await redis.incr(clave);
-        // Solo en la primera del minuto: en las otras 59 el TTL ya está puesto.
-        if (n === 1) await redis.expire(clave, 120);
-        return n;
-      };
       const [na, nt] = await Promise.all([
-        cuenta(claveDeVentana('a', automationId, ahora)),
-        cuenta(claveDeVentana('t', tenantId, ahora)),
+        this.cuenta(claveDeVentana('a', automationId, ahora)),
+        this.cuenta(claveDeVentana('t', tenantId, ahora)),
       ]);
+      if (Math.random() < PURGA_PROBABILIDAD) {
+        await this.prisma.hookRateWindow
+          .deleteMany({ where: { createdAt: { lt: new Date(ahora - PURGA_ANTIGUEDAD_MS) } } })
+          .catch(() => undefined);
+      }
       return na <= TOPE_POR_MINUTO && nt <= TOPE_TENANT_POR_MINUTO;
     } catch (e) {
       this.logger.warn(`No se pudo contar el tope del hook: ${(e as Error).message}`);
       return true;
     }
+  }
+
+  private async cuenta(clave: string): Promise<number> {
+    const filas = await this.prisma.$queryRaw<{ count: number }[]>`
+      INSERT INTO "HookRateWindow" (key, count)
+      VALUES (${clave}, 1)
+      ON CONFLICT (key) DO UPDATE SET count = "HookRateWindow".count + 1
+      RETURNING count
+    `;
+    return filas[0]?.count ?? 1;
   }
 
   /**

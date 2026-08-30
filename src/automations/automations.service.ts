@@ -4,10 +4,10 @@
 // dibujar el grafo está roto por definición) y `active` exige que el grafo se pueda recorrer.
 // El interruptor es la frontera, no el editor.
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bullmq';
 import { Prisma } from '@prisma/client';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY, everyMinutesCron } from '../queue/queue-options';
 import { catalogoPublico, interpolarConfig, nodeType, validarConfig, validarTrigger } from './catalog';
 import { problemasDelGrafo } from './graph';
 import { FlujoConocido, idsLlamados, problemasDeLlamadas } from './llamadas';
@@ -19,7 +19,7 @@ import { assertSafeOutboundUrl } from '../waha/waha.url';
 import { channelAdapter } from '../messaging/channels';
 import { isWithinWindow } from '../messaging/messaging.util';
 import { catalogoDeFunciones, problemasDeFunciones } from './expresiones';
-import { AUTOMATION_QUEUE } from './automations.queue';
+import { AUTOMATION_QUEUE, AUTOMATION_CRON_QUEUE, AUTOMATION_SWEEP_QUEUE } from './automations.queue';
 import { nuevoTokenDeHook, urlDelHook } from './hooks';
 import { armar, FilaCubo, parseDias, ventana, zonaValida } from './metricas';
 
@@ -27,6 +27,8 @@ const AUTOMATION_INCLUDE = {
   nodes: { orderBy: { createdAt: 'asc' } },
   edges: true,
 } as const;
+
+const SWEEP_KEY = 'automation-sweep-tick';
 
 @Injectable()
 export class AutomationsService {
@@ -36,7 +38,7 @@ export class AutomationsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(AUTOMATION_QUEUE) private readonly cola: Queue,
+    private readonly cola: PgBossService,
   ) {}
 
   catalogo() {
@@ -479,7 +481,7 @@ export class AutomationsService {
       contexto: await contextoDeConversacion(this.prisma, tenantId, conversationId, { tipo: 'manual' }),
     });
     if (!run) throw new BadRequestException('Ya hay una ejecución en curso para esa conversación.');
-    await this.cola.add('run', { runId: run.id });
+    await this.cola.send(AUTOMATION_QUEUE, { runId: run.id });
     return run;
   }
 
@@ -913,56 +915,46 @@ export class AutomationsService {
 
   // --- cron ---------------------------------------------------------------------------
   //
-  // BullMQ ya sabe de patrones cron, así que no hace falta ni un barrido propio ni una
-  // librería que parsee la expresión: un job repetible por automatización, con el id de la
-  // automatización como `jobId` para que reactivarla no deje dos.
+  // pg-boss ya sabe de patrones cron, así que no hace falta ni un barrido propio ni una
+  // librería que parsee la expresión: un schedule por automatización en `AUTOMATION_CRON_QUEUE`,
+  // con el id de la automatización como `key` para que reactivarla no deje dos. A diferencia de
+  // BullMQ, el schedule vive en Postgres: sobrevive un reinicio sin que nadie lo reponga.
 
   async sincronizarCron(automationId: string, trigger: unknown) {
-    await this.quitarCron(automationId);
     const patron = patronCron(trigger);
-    if (!patron) return;
-    await this.cola.add(
-      'cron',
-      { automationId },
-      { repeat: { pattern: patron }, jobId: `cron:${automationId}` },
-    );
+    if (!patron) return this.quitarCron(automationId);
+    await this.cola.createQueue(AUTOMATION_CRON_QUEUE, STANDARD_RETRY);
+    await this.cola.schedule(AUTOMATION_CRON_QUEUE, patron, { automationId }, { key: automationId });
   }
 
   private async quitarCron(automationId: string) {
-    const repetibles = await this.cola.getRepeatableJobs();
-    for (const r of repetibles.filter((x) => x.id === `cron:${automationId}`)) {
-      await this.cola.removeRepeatableByKey(r.key);
-    }
+    await this.cola.unschedule(AUTOMATION_CRON_QUEUE, automationId);
   }
 
   // --- barrido --------------------------------------------------------------------------
   //
-  // Job repetible de BullMQ y NO `setInterval`, por el mismo motivo que la reconciliación de
+  // Schedule de pg-boss y NO `setInterval`, por el mismo motivo que la reconciliación de
   // WAHA lo dice en su comentario: `onModuleInit` corre en CADA réplica, así que con dos
   // instancias del backend un `setInterval` doble-dispararía. Aquí eso no es cosmético: dos
-  // réplicas liberando el mismo run a la vez es una carrera sobre la unique. El scheduler vive
-  // en Redis y encola una sola vez por periodo.
+  // réplicas liberando el mismo run a la vez es una carrera sobre la unique. El schedule vive
+  // en Postgres y encola una sola vez por periodo, sin reponerlo al reiniciar.
 
   async programarBarrido() {
     if (this.barridoMs <= 0) return; // 0 o negativo desactiva, como la purga de WAHA
     try {
-      await this.cola.add(
-        'sweep',
-        {},
-        {
-          repeat: { every: this.barridoMs },
-          jobId: 'automation-sweep-tick', // idempotente: reiniciar no acumula schedulers
-          // Un tick cada pocos minutos no debe llenar Redis de completados.
-          removeOnComplete: 10,
-        },
-      );
+      await this.cola.createQueue(AUTOMATION_SWEEP_QUEUE, STANDARD_RETRY);
+      await this.cola.schedule(AUTOMATION_SWEEP_QUEUE, everyMinutesCron(this.barridoMs), {}, {
+        key: SWEEP_KEY, // idempotente: reiniciar no acumula schedulers
+      });
     } catch (e) {
-      // Redis caído al arrancar no puede tumbar el boot del backend.
+      // La base caída al arrancar no puede tumbar el boot del backend.
       this.logger.warn(`No se pudo programar el barrido de runs: ${(e as Error).message}`);
     }
   }
 
-  /** Al arrancar: reponer los repetibles de las cron activas (Redis puede haberse vaciado). */
+  /** Al arrancar: reconcilia los schedules de cron con las automatizaciones activas. Ya no
+   * es "reponer" (el schedule persiste en Postgres, no en una cache) sino simple higiene: una
+   * automatización que cambió de trigger mientras el proceso estaba caído queda al día. */
   async reponerCrons() {
     const activas = await this.prisma.automation.findMany({
       where: { status: 'active' },

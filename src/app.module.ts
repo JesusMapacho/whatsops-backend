@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { BullModule } from '@nestjs/bullmq';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { validateEnv } from './config/env.validation';
 import { PrismaModule } from './prisma/prisma.module';
+import { PgBossModule } from './queue/pgboss.module';
 import { HealthController } from './health/health.controller';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -33,23 +33,8 @@ import { PermissionsGuard } from './auth/permissions.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
-    BullModule.forRootAsync({
-      inject: [ConfigService],
-      // Pasamos opciones (no una instancia): BullMQ crea su propio cliente ioredis
-      // y evita el choque de tipos entre dos copias del paquete.
-      useFactory: (config: ConfigService) => {
-        const u = new URL(config.get<string>('REDIS_URL')!);
-        return {
-          connection: {
-            host: u.hostname,
-            port: Number(u.port || 6379),
-            username: u.username || undefined,
-            password: u.password || undefined,
-          },
-        };
-      },
-    }),
     PrismaModule,
+    PgBossModule,
     AuthModule,
     UsersModule,
     InvitationsModule,

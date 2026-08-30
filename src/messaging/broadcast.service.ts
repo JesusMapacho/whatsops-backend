@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
+import { PgBossService } from '../queue/pgboss.service';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { MessagingService } from './messaging.service';
@@ -45,7 +44,7 @@ export class BroadcastService {
     private readonly messaging: MessagingService,
     private readonly lists: ContactListsService,
     private readonly events: EventsGateway,
-    @InjectQueue(BROADCAST_QUEUE) private readonly queue: Queue,
+    private readonly queue: PgBossService,
     config: ConfigService,
   ) {
     this.lifecycle = lifecycleFromEnv((k) => config.get<string>(k));
@@ -245,15 +244,16 @@ export class BroadcastService {
       select: { id: true },
     });
     // Un job RETRASADO por destinatario, no un tick que va sacando de la cola: el
-    // retraso vive en Redis y sobrevive a un reinicio, `jobId` hace el encolado
+    // retraso vive en Postgres y sobrevive a un reinicio, `id` hace el encolado
     // idempotente (relanzar no puede duplicar) y no hace falta ningún lock entre
     // réplicas.
     const step = sendIntervalMs(conn.platform);
-    await this.queue.addBulk(
+    await this.queue.insert(
+      BROADCAST_QUEUE,
       rows.map((r, i) => ({
-        name: 'recipient',
+        id: r.id,
         data: { recipientId: r.id },
-        opts: { jobId: r.id, delay: i * step },
+        startAfter: new Date(Date.now() + i * step),
       })),
     );
 
@@ -398,7 +398,7 @@ export class BroadcastService {
       data: { status: 'canceled', reason: 'Cancelado por el operador.' },
     });
     if (!count) throw new NotFoundException('Envío no encontrado o ya terminado');
-    // Los jobs NO se borran de Redis: borrarlos sería una carrera con el worker que
+    // Los jobs NO se borran de la cola: borrarlos sería una carrera con el worker que
     // ya tiene uno en la mano. El worker relee el estado y no hace nada.
     await this.closePending(id, 'Envío cancelado.');
     await this.emitProgress(id);

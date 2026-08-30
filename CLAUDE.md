@@ -26,6 +26,13 @@ referencias relativas funcionan: `../GW/contrato/NN-slug.md`.
 NestJS (Node/TS) · **PostgreSQL + Prisma** · **Redis + BullMQ** · WebSocket (Socket.IO).
 **Monolito modular**, no microservicios.
 
+**Toda la API cuelga de `/api`** (`app.setGlobalPrefix('api')`, `main.ts`). Existe para que
+este mismo proceso pueda servir además el `index.html` compilado de Angular (`public/`, vía
+`app.useStaticAssets` + un fallback de ruta comodín) sin que la ruta comodín del SPA se
+coma un endpoint de la API — con ~20 grupos de rutas en la raíz no hay otra forma barata de
+separarlos. Ver «Despliegue» en `README.md` para las dos formas de desplegar (un solo
+origen en Heroku, o API y app en dominios distintos como antes).
+
 ## Principios que no se rompen
 
 De `../GW/constitution/constitution.md`; aquí están los que restringen código:
@@ -74,7 +81,8 @@ Dos acoplamientos hacia la app, y ahora viven en repos distintos:
 
 - `assistant/synthesis.ts` devuelve **rutas de navegación de Angular** (`/bandeja`). Si allí
   se renombra una ruta, el asistente manda al usuario a un 404 y nada lo detecta.
-- `invitations.service.ts` arma enlaces de la app con `APP_URL`.
+- `invitations.service.ts` arma enlaces de la app con `APP_URL` — son rutas de Angular, no
+  de esta API, así que no llevan `/api`.
 
 Los dos son datos de la frontera. Si cambian, van al contrato.
 

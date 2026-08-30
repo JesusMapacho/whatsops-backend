@@ -3,10 +3,15 @@
 Backend NestJS + Prisma de WhatsOps: la WhatsApp Cloud API (y el transporte por QR de la
 capa gratuita) con multi-tenant, CRM y orquestador detrás.
 
-- **La app** (Angular) vive en su propio repo, `whatsops-frontend`, y se arranca aparte.
+- **La app** (Angular) vive en su propio repo, `CMRFRONTEND`. En local se arranca aparte
+  (`ng serve`); en producción, este backend también puede servirla compilada — ver
+  «Despliegue» más abajo.
 - **El diseño, las specs y el contrato** viven en `GW`. Si tienes los tres
   clonados como hermanos, las referencias relativas de las specs (`../GW/…`)
   funcionan tal cual.
+- **Toda la API cuelga de `/api`** (`app.setGlobalPrefix('api')` en `main.ts`): `/api/health`,
+  `/api/webhook`, `/api/crm/...`. Es lo que le deja al mismo proceso servir además el `index.html`
+  del SPA en cualquier otra ruta sin que las dos cosas choquen.
 
 ## Arranque local
 
@@ -92,7 +97,7 @@ curl -H "X-Api-Key: dev-waha-key" http://localhost:3002/api/sessions
 
 # Y que el backend la alcanza: 'up' = ok, 'down' = no responde o la key no cuadra,
 # 'disabled' = faltan las variables en .env
-curl http://localhost:3000/health
+curl http://localhost:3000/api/health
 ```
 
 > ⚠️ **`WAHA_URL` debe usar `127.0.0.1`, no `localhost`.** El contenedor se publica
@@ -123,7 +128,7 @@ Requiere en `.env`: `WAHA_URL`, `WAHA_API_KEY`, `WAHA_CALLBACK_URL` y
 > Las dos URLs se confunden con facilidad: `WAHA_URL` la usa el **backend** para
 > llamar a WAHA (`http://localhost:3002`), y `WAHA_CALLBACK_URL` la usa **WAHA
 > dentro del contenedor** para llamar al backend del host, de ahí
-> `http://host.docker.internal:3000/webhook/waha`. Poner `localhost` en la segunda
+> `http://host.docker.internal:3000/api/webhook/waha`. Poner `localhost` en la segunda
 > apuntaría al propio contenedor y no llegaría ningún mensaje.
 >
 > El volumen `wahasessions` guarda el estado de emparejamiento. Si lo borras
@@ -133,10 +138,10 @@ Una vez emparejado, la operación se ve en tres sitios (detalle en `../GW/docs/w
 
 ```bash
 # Estado de las sesiones (gauge de Prometheus)
-curl -H "Authorization: Bearer dev-metrics-token" http://localhost:3000/metrics | grep waha_sessions
+curl -H "Authorization: Bearer dev-metrics-token" http://localhost:3000/api/metrics | grep waha_sessions
 
 # Salud (el código HTTP NO depende de WAHA a propósito)
-curl http://localhost:3000/health          # → {"status":"ok","waha":"up"}
+curl http://localhost:3000/api/health      # → {"status":"ok","waha":"up"}
 ```
 
 Y en `/platform` (super-admin) la tabla **"Sesiones de WhatsApp por QR"** con el
@@ -179,9 +184,46 @@ No hay Jest: cada módulo no trivial deja un `*.check.ts` hermano con `node:asse
 
 ## Despliegue
 
-La API y la app se despliegan **por separado**, y esa es la razón de que vivan en repos
-distintos. Aquí, el `Dockerfile` de al lado más el `docker-compose.yml` que ya usas en
-local: `git pull && docker compose up -d --build`.
+Dos formas de desplegar, según si la app y la API viven en el mismo origen o no.
+
+### Un solo origen (Heroku, este backend sirve la app Angular)
+
+`main.ts` sirve `public/` (el build de Angular) en cualquier ruta que no empiece con
+`/api`, con `index.html` de fallback para las rutas del SPA. `public/` no se versiona
+(como `dist/`): hay que generarlo antes de desplegar.
+
+1. Con `CMRFRONTEND` clonado como hermano de este repo, y con su
+   `src/environments/environment.prod.ts` en `apiUrl: ''` (mismo origen — ya es el
+   default): `npm run sync:frontend`. Compila el Angular y lo copia a `./public`.
+2. Desplegar con **una** de estas dos vías:
+   - **Buildpack de Node + Procfile** (ya en este repo). Heroku instala dependencias, corre
+     `heroku-postbuild` (`prisma generate` + `nest build`) y usa `Procfile` (`release` para
+     `prisma migrate deploy`, `web` para `node dist/main.js`). Como Heroku despliega
+     exactamente el commit que le llega, `public/` tiene que estar en ESE commit: está en
+     `.gitignore`, así que hace falta `git add -f public` antes de `git commit` justo para
+     el push de deploy (o mantener una rama de deploy aparte que sí lo versione).
+   - **Contenedor** (`Dockerfile` de al lado, que ya hace `prisma migrate deploy && node
+     dist/main.js` al arrancar). El build de Docker lee del disco, no de git, así que
+     `public/` no necesita estar commiteado — solo presente cuando corras el build:
+     ```bash
+     heroku stack:set container -a tu-app
+     # heroku.yml en la raíz del repo:
+     #   build:
+     #     docker:
+     #       web: Dockerfile
+     git push heroku main
+     ```
+3. Variables de entorno (`heroku config:set ...`): todas las de `.env.example` con secretos
+   reales — `env.validation.ts` rechaza el arranque si alguna sigue con el valor de ejemplo.
+   `PORT` la pone Heroku solo, no la toques. Con front y API en el mismo host, `APP_URL` y
+   `CORS_ORIGINS` son la URL pública de la propia app (`https://tu-app.herokuapp.com`) y
+   `COOKIE_DOMAIN` se deja **sin poner** (cookie host-only, correcto cuando es literalmente
+   el mismo host).
+
+### Por separado (API y app en dominios distintos)
+
+El `Dockerfile` de al lado más el `docker-compose.yml` que ya usas en local:
+`git pull && docker compose up -d --build`.
 
 Las cuatro variables que hacen de contrato con la app, y que en desarrollo no se notan:
 

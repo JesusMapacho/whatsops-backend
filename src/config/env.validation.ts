@@ -1,5 +1,5 @@
 // ponytail: validación de env a mano, sin Joi/class-validator. Falla rápido si falta algo.
-const REQUIRED = ['DATABASE_URL', 'REDIS_URL', 'PORT', 'JWT_SECRET', 'ENCRYPTION_KEY', 'WEBHOOK_VERIFY_TOKEN', 'META_APP_SECRET'] as const;
+const REQUIRED = ['DATABASE_URL', 'PORT', 'JWT_SECRET', 'ENCRYPTION_KEY', 'WEBHOOK_VERIFY_TOKEN', 'META_APP_SECRET'] as const;
 
 // El asistente (v1.5) es opcional: la app arranca sin él. Pero si se configura
 // (aparece LLM_MODEL), exigimos el grupo completo para no arrancar a medias.

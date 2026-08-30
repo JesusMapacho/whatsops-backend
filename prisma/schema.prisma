@@ -1194,6 +1194,17 @@ model TenantVariable {
   @@index([tenantId])
 }
 
+// Contador atómico por ventana de un minuto para el rate-limit de `POST /hooks/<token>`
+// (`automations-hooks.service.ts`). `key` ya lleva el minuto codificado (`claveDeVentana` en
+// `hooks.ts`), así que no hace falta TTL: una clave vieja simplemente deja de incrementarse y
+// una purga oportunista (misma llamada, con baja probabilidad) barre las que ya no sirven.
+// Reemplaza el `INCR`/`EXPIRE` de Redis que antes pedía prestado el cliente de BullMQ.
+model HookRateWindow {
+  key       String   @id
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+}
+
 // Respuesta rápida: plantilla de texto interna del tenant para la caja de envío.
 model CannedResponse {
   id        String   @id @default(cuid())

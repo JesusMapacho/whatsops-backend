@@ -1,24 +1,31 @@
-import { Logger } from '@nestjs/common';
-import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { WahaService, WAHA_QUEUE } from './waha.service';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import type { Job } from 'pg-boss';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY } from '../queue/queue-options';
+import { WahaService, WAHA_QUEUE, WAHA_HISTORY_QUEUE } from './waha.service';
 
-// Worker de la reconciliación de sesiones WAHA. Reintentos/backoff los configura
-// el módulo. El disparo es un job repeatable programado en WahaService.onModuleInit.
-@Processor(WAHA_QUEUE)
-export class WahaProcessor extends WorkerHost {
+// Worker de la reconciliación de sesiones WAHA y de la importación de historial. Antes
+// vivían en la misma cola de BullMQ, distinguidos por `job.name`; en pg-boss el nombre del
+// job ES el nombre de la cola, así que son dos colas — misma idea, sin necesitar un `switch`.
+@Injectable()
+export class WahaProcessor implements OnModuleInit {
   private readonly logger = new Logger(WahaProcessor.name);
 
-  constructor(private readonly waha: WahaService) {
-    super();
+  constructor(
+    private readonly waha: WahaService,
+    private readonly queue: PgBossService,
+  ) {}
+
+  async onModuleInit() {
+    await this.queue.createQueue(WAHA_QUEUE, STANDARD_RETRY);
+    await this.queue.createQueue(WAHA_HISTORY_QUEUE, STANDARD_RETRY);
+    await this.queue.work(WAHA_QUEUE, () => this.reconcileTick());
+    await this.queue.work<{ tenantId: string; conversationId: string }>(WAHA_HISTORY_QUEUE, (job) =>
+      this.waha.importHistory(job.data.tenantId, job.data.conversationId),
+    );
   }
 
-  async process(job: { name: string; data: any }) {
-    // Dos tipos de job en la misma cola: el tick de reconciliación (repeatable) y
-    // la importación de historial de una conversación (a demanda).
-    if (job.name === 'history') {
-      return this.waha.importHistory(job.data.tenantId, job.data.conversationId);
-    }
-
+  private async reconcileTick() {
     const s = await this.waha.reconcile();
     // Solo se loguea cuando hubo algo que corregir: si no, son 720 líneas al día.
     if (s.updated || s.restarted || s.deleted) {

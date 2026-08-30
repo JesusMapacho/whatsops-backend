@@ -1,7 +1,6 @@
-import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
 import { WEBHOOK_QUEUE } from './webhook.service';
 import { buildWebhookEventWhere, webhookEventScope, WebhookEventFilter } from './webhook-events.util';
 
@@ -9,7 +8,7 @@ import { buildWebhookEventWhere, webhookEventScope, WebhookEventFilter } from '.
 export class WebhookEventsService {
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(WEBHOOK_QUEUE) private readonly queue: Queue,
+    private readonly queue: PgBossService,
   ) {}
 
   list(tenantId: string, filter: WebhookEventFilter, limit = 50, before?: string) {
@@ -49,7 +48,7 @@ export class WebhookEventsService {
       data: { processStatus: 'pending', error: null },
     });
     // Mismo worker de la feature 03; idempotente por wamid → no duplica mensajes.
-    await this.queue.add('process', { webhookEventId: id });
+    await this.queue.send(WEBHOOK_QUEUE, { webhookEventId: id });
     return { requeued: true };
   }
 }

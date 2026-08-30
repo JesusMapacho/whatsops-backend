@@ -1,8 +1,7 @@
-import { InjectQueue } from '@nestjs/bullmq';
 import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
 import { verifyBillingSignature } from './billing.signature';
 
 export const BILLING_QUEUE = 'billing-events';
@@ -15,7 +14,7 @@ export class BillingService {
 
   constructor(
     private readonly prisma: PrismaService,
-    @InjectQueue(BILLING_QUEUE) private readonly queue: Queue,
+    private readonly queue: PgBossService,
     config: ConfigService,
   ) {
     // ponytail: proveedor tras flag. Con STRIPE_ENABLED=false (def) el flujo es
@@ -118,7 +117,7 @@ export class BillingService {
     } catch {
       throw new UnauthorizedException('Payload inválido');
     }
-    await this.queue.add('process', { event });
+    await this.queue.send(BILLING_QUEUE, { event });
     return { received: true };
   }
 

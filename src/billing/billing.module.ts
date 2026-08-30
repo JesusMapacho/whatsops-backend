@@ -1,24 +1,21 @@
-import { BullModule } from '@nestjs/bullmq';
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY } from '../queue/queue-options';
 import { BillingController } from './billing.controller';
 import { BillingService, BILLING_QUEUE } from './billing.service';
 import { BillingProcessor } from './billing.processor';
 
 @Module({
-  imports: [
-    PrismaModule,
-    BullModule.registerQueue({
-      name: BILLING_QUEUE,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: 1000,
-      },
-    }),
-  ],
+  imports: [PrismaModule],
   controllers: [BillingController],
   providers: [BillingService, BillingProcessor],
   exports: [BillingService],
 })
-export class BillingModule {}
+export class BillingModule implements OnModuleInit {
+  constructor(private readonly queue: PgBossService) {}
+
+  async onModuleInit() {
+    await this.queue.createQueue(BILLING_QUEUE, STANDARD_RETRY);
+  }
+}

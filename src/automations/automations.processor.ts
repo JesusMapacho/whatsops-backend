@@ -4,30 +4,31 @@
 // proveedores externos, y eso no puede colgar ni una petición HTTP ni la ingesta de un
 // mensaje.
 //
-// UN NODO POR JOB, no el grafo entero en un job: así el reintento de BullMQ reintenta el
+// UN NODO POR JOB, no el grafo entero en un job: así el reintento de pg-boss reintenta el
 // paso que falló y no todo lo anterior —que ya le mandó mensajes a un cliente—.
-import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
-import { Job, Queue } from 'bullmq';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import type { JobWithMetadata } from 'pg-boss';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventsGateway } from '../events/events.gateway';
 import { MessagingService } from '../messaging/messaging.service';
 import { ConversationsService } from '../messaging/conversations.service';
 import { DealsService } from '../crm/deals.service';
 import { TasksService } from '../crm/tasks.service';
+import { PgBossService } from '../queue/pgboss.service';
+import { STANDARD_RETRY } from '../queue/queue-options';
 import { Contexto, conSalidaYVariable } from './contexto';
 import { ErrorDeSubflujo, Nivel, Persistencia, TOPE_TIEMPO_MS, ejecutarSubflujo, nivelDelHijo } from './subflujo';
 import { Salida, Servicios, TIPO_LLAMADA, interpolarConfig, nodeType } from './catalog';
 import { MAX_REVIVIDOS, queHacerCon } from './barrido';
 import { nodoRaiz, siguienteNodoId } from './graph';
 import { patronCron } from './triggers';
-import { AUTOMATION_QUEUE } from './automations.queue';
+import { AUTOMATION_QUEUE, AUTOMATION_CRON_QUEUE, AUTOMATION_SWEEP_QUEUE } from './automations.queue';
 import { contextoDeConversacion, crearRun } from './automations.service';
 
 type Arista = { fromNodeId: string; toNodeId: string; branch: string | null };
 
-@Processor(AUTOMATION_QUEUE)
-export class AutomationsProcessor extends WorkerHost {
+@Injectable()
+export class AutomationsProcessor implements OnModuleInit {
   private readonly logger = new Logger(AutomationsProcessor.name);
 
   constructor(
@@ -37,18 +38,25 @@ export class AutomationsProcessor extends WorkerHost {
     private readonly conversations: ConversationsService,
     private readonly deals: DealsService,
     private readonly tasks: TasksService,
-    @InjectQueue(AUTOMATION_QUEUE) private readonly cola: Queue,
-  ) {
-    super();
-  }
+    private readonly cola: PgBossService,
+  ) {}
 
-  async process(job: Job<{ runId?: string; automationId?: string }>) {
-    if (job.name === 'cron') return this.dispararCron(job.data.automationId!);
-    if (job.name === 'sweep') return this.barrer();
-    if (!job.data.runId) return;
-    // ¿Es el último intento? Decide si un fallo mata el run o solo lo deja reintentando.
-    const ultimo = (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1);
-    return this.avanzar(job.data.runId, ultimo);
+  async onModuleInit() {
+    // Idempotentes (ON CONFLICT DO NOTHING): no se confía en el orden de inicialización
+    // entre providers.
+    await this.cola.createQueue(AUTOMATION_QUEUE, STANDARD_RETRY);
+    await this.cola.createQueue(AUTOMATION_CRON_QUEUE, STANDARD_RETRY);
+    await this.cola.createQueue(AUTOMATION_SWEEP_QUEUE, STANDARD_RETRY);
+
+    await this.cola.workWithMetadata<{ runId: string }>(AUTOMATION_QUEUE, {}, (job) => {
+      // ¿Es el último intento? Decide si un fallo mata el run o solo lo deja reintentando.
+      const ultimo = (job.retryCount ?? 0) >= (job.retryLimit ?? 0);
+      return this.avanzar(job.data.runId, ultimo);
+    });
+    await this.cola.work<{ automationId: string }>(AUTOMATION_CRON_QUEUE, (job) =>
+      this.dispararCron(job.data.automationId),
+    );
+    await this.cola.work(AUTOMATION_SWEEP_QUEUE, () => this.barrer());
   }
 
   /**
@@ -134,7 +142,7 @@ export class AutomationsProcessor extends WorkerHost {
         ...(jobPerdido ? {} : { vecesRevivido: { increment: 1 } }),
       },
     });
-    await this.cola.add('run', { runId: run.id });
+    await this.cola.send(AUTOMATION_QUEUE, { runId: run.id });
   }
 
   /**
@@ -163,7 +171,7 @@ export class AutomationsProcessor extends WorkerHost {
       where: { id: run.id },
       data: { status: 'running', currentNodeId: salida.toNodeId, waitingConversationId: null, caducaEn: null },
     });
-    await this.cola.add('run', { runId: run.id });
+    await this.cola.send(AUTOMATION_QUEUE, { runId: run.id });
   }
 
   /** Un tick del cron: crea el run y lo encola como cualquier otro. */
@@ -183,7 +191,7 @@ export class AutomationsProcessor extends WorkerHost {
         patron: patronCron(a.trigger),
       }),
     });
-    if (run) await this.cola.add('run', { runId: run.id });
+    if (run) await this.cola.send(AUTOMATION_QUEUE, { runId: run.id });
   }
 
   private async avanzar(runId: string, ultimoIntento: boolean) {
@@ -336,7 +344,11 @@ export class AutomationsProcessor extends WorkerHost {
     // pasada. Cerrarlo en el primer fallo es la trampa que el `catch` del handler ya documenta:
     // el reintento se encontraría un run que ya no está `running` y se iría sin hacer nada.
     // El barrido ES la compensación, y por eso aquí no hace falta el remiendo que lleva el hook.
-    await this.cola.add('run', { runId: run.id }, esperaMs ? { delay: esperaMs } : undefined);
+    await this.cola.send(
+      AUTOMATION_QUEUE,
+      { runId: run.id },
+      esperaMs ? { startAfter: new Date(Date.now() + esperaMs) } : undefined,
+    );
   }
 
   /**

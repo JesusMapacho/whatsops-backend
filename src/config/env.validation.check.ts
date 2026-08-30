@@ -5,7 +5,6 @@ import { validateEnv } from './env.validation';
 // Lo mínimo para pasar el bloque de REQUIRED, con valores que no son de ejemplo.
 const BASE = {
   DATABASE_URL: 'postgresql://u:p@h:5432/d',
-  REDIS_URL: 'redis://localhost:6379',
   PORT: '3000',
   JWT_SECRET: 'a3f9c1',
   ENCRYPTION_KEY: 'ab'.repeat(32),

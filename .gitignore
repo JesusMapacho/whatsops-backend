@@ -1,6 +1,12 @@
 node_modules/
 dist/
 .env
+# Build del frontend (`npm run sync:frontend` lo llena). Igual que `dist/`: se genera, no
+# se versiona. Un deploy por Docker lo recoge del disco igual (`COPY . .` en el Dockerfile
+# no mira `.gitignore`); un deploy por Heroku buildpack clásico necesita forzar el commit de
+# esta carpeta antes de `git push heroku` — está documentado en el README.
+/public/*
+!/public/.gitkeep
 # Copias del .env antes de tocarlo (p. ej. `.env.bak-pre-5433`). Llevan los mismos secretos
 # que el original, así que la regla de arriba no basta: no casa con los sufijos.
 .env.bak*

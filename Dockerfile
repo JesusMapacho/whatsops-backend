@@ -1,5 +1,8 @@
-# Imagen de la API. Existe porque el backend y la app se despliegan por separado, y esto es
-# lo que se despliega de este lado: `docker compose --profile prod up -d --build`.
+# Imagen de la API. Nació cuando el backend y la app se desplegaban por separado
+# (`docker compose --profile prod up -d --build`); ahora también sirve para el deploy de
+# Heroku en un solo dyno, con el Angular compilado dentro (ver `main.ts` y
+# `npm run sync:frontend`): `COPY . .` de más abajo se lleva `public/` si existe en el
+# contexto del build, sin que este archivo tenga que saber nada de Angular.
 #
 # `slim` y no `alpine`: Prisma trae binarios de motor enlazados contra glibc y en musl hay
 # que pelearse con `libc6-compat` y las variantes del engine. La imagen es más grande y a

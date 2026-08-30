@@ -1,8 +1,8 @@
-import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
+import { everyMinutesCron, STANDARD_RETRY } from '../queue/queue-options';
 import { CryptoService } from '../crypto/crypto.service';
 import { EventsGateway } from '../events/events.gateway';
 import {
@@ -24,6 +24,7 @@ import { wahaHmacKey, WAHA_EVENTS_VERSION } from '../webhook/waha';
 import { PLATFORM_TENANT_ID } from '../platform/platform.constants';
 
 export const WAHA_QUEUE = 'waha-reconcile';
+export const WAHA_HISTORY_QUEUE = 'waha-history';
 
 // Cada cuánto se reconcilia. Def. 2 min: suficiente para que una caída no pase
 // desapercibida sin castigar a la instancia con listados constantes.
@@ -55,7 +56,7 @@ export class WahaService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly events: EventsGateway,
-    @InjectQueue(WAHA_QUEUE) private readonly queue: Queue,
+    private readonly queue: PgBossService,
     config: ConfigService,
   ) {
     this.wahaUrl = (config.get<string>('WAHA_URL') ?? '').replace(/\/$/, '');
@@ -72,31 +73,27 @@ export class WahaService implements OnModuleInit {
     this.fullSync = config.get<string>('WAHA_FULL_SYNC') === 'true';
   }
 
-  // Job repeatable de BullMQ, NO setInterval: `onModuleInit` corre en cada réplica,
+  // Schedule de pg-boss, NO setInterval: `onModuleInit` corre en cada réplica,
   // así que un setInterval doble-dispararía con dos instancias del backend. El
-  // scheduler vive en Redis y solo encola una vez por periodo.
+  // schedule vive en Postgres (persiste solo, no hay que reponerlo al reiniciar).
   async onModuleInit() {
     if (!this.wahaUrl) return; // WAHA no configurado: nada que reconciliar
     try {
-      await this.queue.add(
-        'reconcile',
-        {},
-        {
-          repeat: { every: this.intervalMs },
-          jobId: 'waha-reconcile-tick', // idempotente: no acumula schedulers al reiniciar
-          removeOnComplete: 10,
-        },
-      );
+      // createQueue es idempotente (ON CONFLICT DO NOTHING): no se confía en el orden de
+      // inicialización entre providers, así que se asegura aquí antes de programar.
+      await this.queue.createQueue(WAHA_QUEUE, STANDARD_RETRY);
+      await this.queue.schedule(WAHA_QUEUE, everyMinutesCron(this.intervalMs), {}, {
+        key: 'waha-reconcile-tick', // idempotente: no acumula schedulers al reiniciar
+      });
     } catch (e) {
       this.logger.warn(`No se pudo programar la reconciliación: ${(e as Error).message}`);
     }
   }
 
   // Encola la importación del historial de UNA conversación. Los datos del job
-  // llevan SOLO ids: viven en Redis en claro, así que la api key se re-lee y
-  // descifra dentro del worker.
+  // llevan SOLO ids: la api key se re-lee y descifra dentro del worker.
   async queueHistoryImport(tenantId: string, conversationId: string) {
-    await this.queue.add('history', { tenantId, conversationId });
+    await this.queue.send(WAHA_HISTORY_QUEUE, { tenantId, conversationId });
     return { queued: true };
   }
 

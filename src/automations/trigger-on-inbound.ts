@@ -8,11 +8,12 @@
 // guardado y tiene que aparecer en la bandeja. Que una automatización no arranque es un
 // problema; perder el mensaje es EL problema que el producto promete no tener.
 import { Logger } from '@nestjs/common';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { PgBossService } from '../queue/pgboss.service';
 import { contextoDeMensaje } from './contexto';
 import { especificidad, evaluarEntrante } from './triggers';
 import { crearRun } from './automations.service';
+import { AUTOMATION_QUEUE } from './automations.queue';
 
 const logger = new Logger('AutomationTrigger');
 
@@ -27,7 +28,7 @@ export interface EntranteParaAutomatizar {
 
 export async function triggerOnInbound(
   prisma: PrismaService,
-  cola: Queue,
+  cola: PgBossService,
   entrante: EntranteParaAutomatizar,
 ): Promise<void> {
   try {
@@ -58,7 +59,7 @@ export async function triggerOnInbound(
           context: { ...ctx, mensaje: { texto: entrante.texto, wamid: entrante.wamid } } as any,
         },
       });
-      await cola.add('run', { runId: esperando.id });
+      await cola.send(AUTOMATION_QUEUE, { runId: esperando.id });
       return;
     }
 
@@ -106,7 +107,7 @@ export async function triggerOnInbound(
     // `null` = ya hay un run aparcado esperando la respuesta de esta persona, así que este
     // mensaje es para él y no para arrancar otro. Se LOGUEA: el silencio de antes es la mitad
     // de por qué «la automatización dejó de responder» era indiagnosticable.
-    if (run) await cola.add('run', { runId: run.id });
+    if (run) await cola.send(AUTOMATION_QUEUE, { runId: run.id });
     else {
       logger.log(
         `El mensaje no disparó «${elegida.a.id}»: ya hay una ejecución esperando respuesta en ` +
