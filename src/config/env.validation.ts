@@ -34,6 +34,7 @@ const PLACEHOLDERS = new Set([
   'change-me-please',
   'dev-metrics-token',
   'dev-billing-secret',
+  'dev-pos-bridge-secret',
 ]);
 
 // Credenciales de ejemplo dentro de una URL. No se pueden comparar por igualdad porque el
@@ -53,6 +54,7 @@ const SECRETS = [
   'LLM_API_KEY',
   'PLATFORM_ADMIN_PASSWORD',
   'STRIPE_WEBHOOK_SECRET',
+  'POS_SERVICE_SECRET',
 ] as const;
 
 // Mismo criterio que `session-cookie.ts`: producción es el default y de dev se sale

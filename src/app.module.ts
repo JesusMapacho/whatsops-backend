@@ -25,6 +25,7 @@ import { AssistantModule } from './assistant/assistant.module';
 import { BrandingModule } from './branding/branding.module';
 import { WahaModule } from './waha/waha.module';
 import { AutomationsModule } from './automations/automations.module';
+import { PosIntegrationModule } from './integrations/pos/pos-integration.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { CsrfGuard } from './auth/csrf.guard';
 import { RolesGuard } from './auth/roles.guard';
@@ -55,6 +56,7 @@ import { PermissionsGuard } from './auth/permissions.guard';
     BrandingModule,
     WahaModule,
     AutomationsModule,
+    PosIntegrationModule,
   ],
   controllers: [HealthController],
   providers: [

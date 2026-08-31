@@ -172,6 +172,7 @@ model Tenant {
   automationRuns  AutomationRun[]
   automationSteps AutomationRunStep[]
   variables       TenantVariable[]
+  posLink         PosLink?
 }
 
 // Método de pago de la suscripción a WhatsOps. NUNCA guarda el PAN: solo
@@ -333,6 +334,7 @@ model User {
   createdTasks        Task[]     @relation("TaskCreator")
   activities          Activity[]
   automations         Automation[] @relation("AutomationActor")
+  ssoTokens           SsoExchangeToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -1203,6 +1205,51 @@ model HookRateWindow {
   key       String   @id
   count     Int      @default(1)
   createdAt DateTime @default(now())
+}
+
+// --- Puente de identidad con el POS (Nereum) -------------------------------
+//
+// El CRM sigue siendo un producto independiente: estos dos modelos son la única
+// superficie que sabe que existe un POS del otro lado. `PosLink` es el vínculo
+// tenant↔tenant (uno por empresa del POS, aprovisionado automáticamente al
+// darse de alta); `SsoExchangeToken` es el token de un solo uso que deja entrar
+// sin contraseña al usuario que ya se autenticó en el POS.
+
+// Vínculo entre una empresa del POS y un Tenant de este CRM. `status` decide si
+// el módulo CRM del POS puede abrir sesión aquí — se apaga sin borrar nada si el
+// add-on se da de baja.
+model PosLink {
+  id          String   @id @default(cuid())
+  tenantId    String   @unique
+  // Id de la empresa en el POS (empresa.tenant_id, un UUID propio del POS — no
+  // tiene relación con los ids de este esquema, así que es un String pelado).
+  posTenantId String   @unique
+  status      String   @default("active") // active | suspended
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([posTenantId])
+}
+
+// Token de intercambio de un solo uso para el SSO desde el POS. Vive segundos
+// (`expiresAt`), no minutos: es una posta entre dos peticiones servidor-a-
+// servidor y una navegación del mismo instante, no una sesión.
+//
+// Igual que `Invitation`, se guarda SOLO el hash: quien lea la base no puede
+// abrir sesión con lo que encuentre ahí.
+model SsoExchangeToken {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  userId     String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // Respuesta rápida: plantilla de texto interna del tenant para la caja de envío.

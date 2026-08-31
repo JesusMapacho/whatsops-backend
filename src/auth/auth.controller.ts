@@ -1,15 +1,24 @@
-import { Body, Controller, Get, HttpCode, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { MfaService } from './mfa.service';
 import { Public } from './public.decorator';
 import { CurrentUser, AuthUser } from './current-user.decorator';
 import { CookieSink, clearSession, openSession } from './session-cookie';
 
+const APP_URL_POR_DEFECTO = 'http://localhost:4200';
+
+// Lo que hace falta de `Response` para este controller: además de `CookieSink`
+// (que ya usan login/register), el redirect de `sso/consume`. Estructural, como
+// `CookieSink` — este backend no trae `@types/express` a propósito.
+type RedirectSink = CookieSink & { redirect(status: number, url: string): void };
+
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly mfa: MfaService,
+    private readonly config: ConfigService,
   ) {}
 
   @Public()
@@ -81,5 +90,29 @@ export class AuthController {
   @Get('me')
   me(@CurrentUser() user: AuthUser) {
     return this.auth.me(user);
+  }
+
+  /**
+   * Aterrizaje del SSO desde el módulo CRM del POS (`integrations/pos`). Público
+   * porque todavía no hay sesión — el token de un solo uso es lo único que
+   * identifica a quien llega. No es un `fetch`: es una navegación completa del
+   * navegador, así que responde con un 302 y no con JSON, igual que un login
+   * normal pero sin pantalla de por medio.
+   */
+  @Public()
+  @Get('sso/consume')
+  async consumeSso(@Query('token') token: string, @Res() res: RedirectSink) {
+    const appUrl = (this.config.get<string>('APP_URL') || APP_URL_POR_DEFECTO).replace(/\/+$/, '');
+    try {
+      const sesion = await this.auth.consumeSso(token);
+      openSession(res, sesion);
+    } catch {
+      // Un enlace muerto no puede dejar al usuario viendo un JSON de error suelto
+      // en la pestaña que le abrió el POS: lo manda al login del CRM, que ya sabe
+      // pintar "vuelve a intentarlo" mejor que este endpoint.
+      res.redirect(302, `${appUrl}/login`);
+      return;
+    }
+    res.redirect(302, appUrl);
   }
 }

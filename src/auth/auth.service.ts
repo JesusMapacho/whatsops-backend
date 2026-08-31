@@ -6,6 +6,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RolesService } from '../roles/roles.service';
 import { AuthUser } from './current-user.decorator';
@@ -133,6 +134,43 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException('El desafío caducó. Vuelve a iniciar sesión.');
     }
+  }
+
+  /**
+   * Canjea el token de un solo uso del puente con el POS (`integrations/pos`) por
+   * una sesión. Misma forma que `login`/`InvitationsService.accept`: quien llama
+   * (el controller) abre la cookie con `openSession()`. `mfaPendiente` sale
+   * `false` para toda cuenta creada por este camino porque nace `agent`/`admin`
+   * de tenant, nunca `isPlatform` — `requiereSegundoFactor` (`mfa.ts`) no las toca.
+   */
+  async consumeSso(token: string) {
+    if (typeof token !== 'string' || token.length < 20) {
+      throw new UnauthorizedException('Enlace de acceso inválido');
+    }
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const fila = await this.prisma.ssoExchangeToken.findUnique({ where: { tokenHash } });
+    if (!fila || fila.consumedAt || fila.expiresAt.getTime() < Date.now()) {
+      throw new UnauthorizedException('Este enlace de acceso ya caducó o ya se usó');
+    }
+    // `updateMany` con `consumedAt: null` en el where, no `update` por id: si dos
+    // peticiones llegan a la vez con el mismo token, el `count` decide cuál de las
+    // dos lo reclamó — la otra ve 0 filas y falla, así el token no abre dos sesiones.
+    const reclamado = await this.prisma.ssoExchangeToken.updateMany({
+      where: { tokenHash, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+    if (reclamado.count === 0) {
+      throw new UnauthorizedException('Este enlace de acceso ya caducó o ya se usó');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: fila.userId },
+      include: { tenant: { select: { onboardingComplete: true } } },
+    });
+    if (!user || user.status === 'disabled') {
+      throw new UnauthorizedException('Cuenta no disponible');
+    }
+    return this.sign(user.id, user.tenantId, user.role, user.roleId, user.tenant.onboardingComplete);
   }
 
   async me(auth: AuthUser) {
